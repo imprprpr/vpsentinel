@@ -175,7 +175,7 @@ class TestLightsailCloudProvider(unittest.TestCase):
                 resp.json.return_value = {'operations': [{'status': 'Succeeded'}]}
             elif 'GetStaticIp' in target:
                 resp.json.return_value = {
-                    'staticIp': {'ipAddress': '198.51.100.99', 'name': 'new-ip'}
+                    'staticIp': {'ipAddress': '198.51.100.99', 'name': 'new-ip', 'attachedTo': 'my-instance'}
                 }
             else:
                 resp.json.return_value = {}
@@ -283,7 +283,8 @@ class TestHetznerCloudProvider(unittest.TestCase):
 
         mock_post.side_effect = post_side_effect
 
-        new_ip = self.provider_prim.change_public_ip()
+        with patch.object(sentinel_core.ConfigManager, 'load', return_value={'hetzner': {'external_controller': True}}):
+            new_ip = self.provider_prim.change_public_ip()
         self.assertEqual(new_ip, '168.119.88.99')
         mock_del.assert_called()
 
@@ -319,7 +320,8 @@ class TestAzureCloudProvider(unittest.TestCase):
         nic_resp.json.return_value = {
             'location': 'eastus',
             'properties': {
-                'ipConfigurations': [
+                'provisioningState': 'Succeeded',
+                    'ipConfigurations': [
                     {'properties': {'publicIPAddress': {'id': '/subscriptions/.../sentinel-pip-old'}}}
                 ]
             }
@@ -342,17 +344,21 @@ class TestAzureCloudProvider(unittest.TestCase):
         tok_resp.json.return_value = {'access_token': 'azure-mock-bearer-token'}
         mock_post.return_value = tok_resp
 
+        nic_reads = 0
         def get_side_effect(url, headers=None, timeout=None):
+            nonlocal nic_reads
             resp = MagicMock()
             resp.status_code = 200
             if 'networkInterfaces' in url:
+                nic_reads += 1
                 resp.json.return_value = {
                     'location': 'eastus',
                     'properties': {
-                        'ipConfigurations': [
+                        'provisioningState': 'Succeeded',
+                    'ipConfigurations': [
                             {
                                 'name': 'ipconfig1',
-                                'properties': {'publicIPAddress': {'id': '/sub/.../old-pip'}}
+                                'properties': {'publicIPAddress': {'id': '/sub/.../new-pip-id' if nic_reads > 1 else '/sub/.../old-pip'}}
                             }
                         ]
                     }

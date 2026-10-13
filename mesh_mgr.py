@@ -1,3 +1,5 @@
+from net_policy import open_secure, read_limited
+from secure_files import transactional
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 # ==============================================================================
@@ -28,6 +30,7 @@ class MeshManager:
         return ConfigManager.load()
 
     @classmethod
+    @transactional
     def save_config(cls, cfg):
         return ConfigManager.save(cfg)
 
@@ -37,13 +40,15 @@ class MeshManager:
         return cfg.get('mesh_nodes', [])
 
     @classmethod
+    @transactional
     def save_nodes(cls, nodes):
         cfg = cls.load_config()
         cfg['mesh_nodes'] = nodes
         return cls.save_config(cfg)
 
     @classmethod
-    def add_node(cls, name, host, api_token='', location='Global', tag='REMOTE', enabled=True):
+    @transactional
+    def add_node(cls, name, host, api_token='', location='Global', tag='REMOTE', enabled=True, telemetry_token=''):
         nodes = cls.get_nodes()
         node_id = f"node_{int(time.time())}_{len(nodes) + 1}"
         new_node = {
@@ -51,6 +56,7 @@ class MeshManager:
             'name': name.strip(),
             'host': host.strip().rstrip('/'),
             'api_token': api_token.strip(),
+            'telemetry_token': telemetry_token.strip(),
             'location': location.strip(),
             'tag': tag.strip(),
             'enabled': bool(enabled),
@@ -70,11 +76,12 @@ class MeshManager:
         return new_node
 
     @classmethod
+    @transactional
     def update_node(cls, node_id, update_data):
         nodes = cls.get_nodes()
         for idx, n in enumerate(nodes):
             if n.get('id') == node_id:
-                for k in ['name', 'host', 'api_token', 'location', 'tag', 'enabled']:
+                for k in ['name', 'host', 'api_token', 'telemetry_token', 'location', 'tag', 'enabled']:
                     if k in update_data:
                         nodes[idx][k] = update_data[k]
                 cls.save_nodes(nodes)
@@ -82,6 +89,7 @@ class MeshManager:
         return None
 
     @classmethod
+    @transactional
     def delete_node(cls, node_id):
         nodes = cls.get_nodes()
         new_nodes = [n for n in nodes if n.get('id') != node_id]
@@ -97,25 +105,25 @@ class MeshManager:
             return {'online': False, 'rtt_ms': 0, 'error': 'No host specified', 'checked_at': int(time.time())}
 
         if not host.startswith('http://') and not host.startswith('https://'):
-            url = f"https://{host}/api/status"
+            url = f"https://{host}/api/mesh/telemetry"
         else:
-            url = f"{host}/api/status"
+            url = f"{host}/api/mesh/telemetry"
 
-        token = node.get('api_token', '')
+        token = node.get('telemetry_token', '')
         headers = {'User-Agent': 'VPSentinel-Mesh/2.4'}
         if token:
             headers['Authorization'] = f"Bearer {token}"
 
         ctx = ssl.create_default_context()
-        ctx.check_hostname = False
-        ctx.verify_mode = ssl.CERT_NONE
+        ctx.check_hostname = True
+        ctx.verify_mode = ssl.CERT_REQUIRED
 
         t0 = time.time()
         try:
             req = urllib.request.Request(url, headers=headers)
-            with urllib.request.urlopen(req, timeout=5, context=ctx) as resp:
+            with open_secure(req, timeout=5, context=ctx) as resp:
                 rtt = round((time.time() - t0) * 1000, 1)
-                data = json.loads(resp.read().decode('utf-8'))
+                data = json.loads(read_limited(resp).decode('utf-8'))
                 state = data.get('state', data)
                 metrics = state.get('metrics', {})
                 pub_ip = state.get('public_ip', data.get('public_ip', 'N/A'))
@@ -152,12 +160,12 @@ class MeshManager:
             return {'online': False, 'rtt_ms': 0, 'error': 'Domain empty', 'checked_at': int(time.time())}
         url = domain_str if domain_str.startswith('https://') else f"https://{domain_str}{path}"
         ctx = ssl.create_default_context()
-        ctx.check_hostname = False
-        ctx.verify_mode = ssl.CERT_NONE
+        ctx.check_hostname = True
+        ctx.verify_mode = ssl.CERT_REQUIRED
         t0 = time.time()
         try:
             req = urllib.request.Request(url, headers={'User-Agent': 'VPSentinel-Probe/2.4'})
-            with urllib.request.urlopen(req, timeout=3.5, context=ctx) as resp:
+            with open_secure(req, timeout=3.5, context=ctx) as resp:
                 rtt = round((time.time() - t0) * 1000, 1)
                 return {
                     'online': True,
@@ -228,18 +236,18 @@ class MeshManager:
             return []
 
         if not host.startswith('http://') and not host.startswith('https://'):
-            url = f"https://{host}/sub/base64?token={token}"
+            url = f"https://{host}/sub/base64"
         else:
-            url = f"{host}/sub/base64?token={token}"
+            url = f"{host}/sub/base64"
 
         ctx = ssl.create_default_context()
-        ctx.check_hostname = False
-        ctx.verify_mode = ssl.CERT_NONE
+        ctx.check_hostname = True
+        ctx.verify_mode = ssl.CERT_REQUIRED
 
         try:
-            req = urllib.request.Request(url, headers={'User-Agent': 'VPSentinel-Mesh/2.4'})
-            with urllib.request.urlopen(req, timeout=5, context=ctx) as resp:
-                content = resp.read().decode('utf-8').strip()
+            req = urllib.request.Request(url, headers={'User-Agent': 'VPSentinel-Mesh/2.4', 'Authorization': f'Bearer {token}'})
+            with open_secure(req, timeout=5, context=ctx) as resp:
+                content = read_limited(resp).decode('utf-8').strip()
                 if not content:
                     return []
                 try:
@@ -360,20 +368,34 @@ class MeshManager:
 
         for t in threads:
             t.join(timeout=8)
-        cls.save_nodes(nodes)
+        results = {node['id']: node for node in nodes}
+        def apply(cfg):
+            for node in cfg.get('mesh_nodes', []):
+                probe = results.get(node['id'])
+                if probe and node.get('host') == probe.get('host'):
+                    for key in ('last_status', 'proxy_nodes'):
+                        if key in probe: node[key] = probe[key]
+        from sentinel_core import ConfigManager
+        ConfigManager.update(apply)
 
     @classmethod
     def start_background_poller(cls, interval_sec=60):
+        existing = getattr(cls, '_poller_thread', None)
+        if existing is not None and existing.is_alive():
+            return existing
+        stop_event = threading.Event()
+        cls._stop_event = stop_event
         def _loop():
             logger.info("Starting background Sentinel Mesh node poller...")
-            while True:
+            while not stop_event.is_set():
                 try:
                     cls.refresh_all_nodes()
                 except Exception as e:
                     logger.error(f"Mesh poller error: {e}")
-                time.sleep(interval_sec)
+                stop_event.wait(interval_sec)
 
         t = threading.Thread(target=_loop, name="MeshPollerDaemon", daemon=True)
+        cls._poller_thread = t
         t.start()
         return t
 

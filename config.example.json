@@ -20,14 +20,18 @@
     "auto_heal_mode": "notify_only",
     "reip_cooldown_hours": 24,
     "max_reip_per_day": 2,
-    "last_reip_timestamp": 0
+    "last_reip_timestamp": 0,
+    "inbound_probe_url": "",
+    "inbound_probe_token": ""
   },
   "notifications": {
     "enabled": false,
     "telegram": {
       "enabled": false,
       "bot_token": "123456789:ABCdefGhIJKlmNoPQRsTUVwxyZ",
-      "chat_id": "987654321"
+      "chat_id": "987654321",
+      "bot_enabled": false,
+      "admin_user_ids": []
     },
     "discord": {
       "enabled": false,
@@ -55,7 +59,9 @@
     "admin_username": "admin",
     "secret_path": "/sentinel",
     "enable_host_guard": true,
-    "allowed_hosts": ["vps.example.com"],
+    "allowed_hosts": [
+      "vps.example.com"
+    ],
     "trusted_proxy_cidrs": []
   },
   "transits": [
@@ -68,5 +74,32 @@
       "trojan_port": 22083,
       "enabled": false
     }
-  ]
+  ],
+  "network": {
+    "allowed_private_hosts": [],
+    "ca_bundle": ""
+  },
+  "proxy_sources": [
+    {
+      "type": "sqlite",
+      "enabled": true
+    }
+  ],
+  "hetzner": {
+    "external_controller": false
+  },
+  "cert_sync": {
+    "enabled": false,
+    "role": "disabled",
+    "master_url": "",
+    "sync_token": "",
+    "cert_dir": "",
+    "verify_ssl": true,
+    "expected_domains": [],
+    "poll_interval_hours": 12,
+    "auto_reload_services": [
+      "x-ui"
+    ],
+    "post_sync_hook": ""
+  }
 }

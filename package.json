@@ -1,0 +1,11 @@
+{
+  "name": "vpsentinel-frontend-checks",
+  "private": true,
+  "scripts": {
+    "test": "node tests/frontend-security.cjs"
+  },
+  "devDependencies": {
+    "acorn": "8.19.0",
+    "jsdom": "30.1.2"
+  }
+}

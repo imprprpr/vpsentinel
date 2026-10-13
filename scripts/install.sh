@@ -5,6 +5,7 @@
 # ==============================================================================
 
 set -euo pipefail
+umask 077
 
 if [ -d "/opt/oracle-sentinel" ] && [ ! -d "/opt/vpsentinel" ]; then
     echo ">>> 检测到旧版目录 /opt/oracle-sentinel，平滑迁移至 /opt/vpsentinel ..."
@@ -14,7 +15,7 @@ fi
 
 INSTALL_DIR="/opt/vpsentinel"
 REPO_URL="https://github.com/imprprpr/vpsentinel.git"
-VPSENTINEL_REF="${VPSENTINEL_REF:-main}"
+VPSENTINEL_REF="${VPSENTINEL_REF:-}"
 
 echo "===================================================================="
 echo "          Installing VPSentinel Control Center & Daemon             "
@@ -52,11 +53,15 @@ mkdir -p "$INSTALL_DIR"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 if [ -f "$SCRIPT_DIR/app.py" ]; then
     echo ">>> Copying files from local source tree: $SCRIPT_DIR ..."
-    cp -ru "$SCRIPT_DIR"/* "$INSTALL_DIR/"
+    if [ "$SCRIPT_DIR" != "$INSTALL_DIR" ]; then
+        cp -ru "$SCRIPT_DIR"/* "$INSTALL_DIR/"
+    fi
 else
     if [ ! -f "$INSTALL_DIR/app.py" ]; then
         echo ">>> Cloning repository from GitHub: $REPO_URL (ref: $VPSENTINEL_REF) ..."
-        git clone --branch "$VPSENTINEL_REF" "$REPO_URL" "$INSTALL_DIR" 2>/dev/null || git clone "$REPO_URL" "$INSTALL_DIR"
+        [[ "$VPSENTINEL_REF" =~ ^[a-f0-9]{40}$ ]] || { echo 'Remote installation requires VPSENTINEL_REF as a verified full commit SHA.' >&2; exit 1; }
+        git clone --no-checkout "$REPO_URL" "$INSTALL_DIR"
+        git -C "$INSTALL_DIR" checkout --detach "$VPSENTINEL_REF"
     fi
 fi
 
@@ -70,12 +75,29 @@ if [ ! -d "$INSTALL_DIR/venv" ]; then
 fi
 
 "$INSTALL_DIR/venv/bin/pip" install --upgrade pip
-"$INSTALL_DIR/venv/bin/pip" install -r "$INSTALL_DIR/requirements.txt"
+"$INSTALL_DIR/venv/bin/pip" install --require-hashes -r "$INSTALL_DIR/requirements.txt"
 
+# Code remains root-owned; writable data has a separate service account.
+getent passwd vpsentinel >/dev/null || useradd --system --home-dir /var/lib/vpsentinel --shell /usr/sbin/nologin vpsentinel
+install -d -m 0700 -o vpsentinel -g vpsentinel /var/lib/vpsentinel
+install -d -m 0700 -o vpsentinel -g vpsentinel /etc/vpsentinel/cert
+if [ -f "$INSTALL_DIR/config.json" ] && [ ! -f /var/lib/vpsentinel/config.json ]; then
+    install -m 0600 -o vpsentinel -g vpsentinel "$INSTALL_DIR/config.json" /var/lib/vpsentinel/config.json
+fi
+export VPSENTINEL_HOME=/var/lib/vpsentinel
+export VPSENTINEL_CONFIG_PATH=/var/lib/vpsentinel/config.json
+export VPSENTINEL_CERT_DIR=/etc/vpsentinel/cert
+export VPSENTINEL_OCI_DIR=/var/lib/vpsentinel/oci
+if [ -d /root/.oci ] && [ ! -d "$VPSENTINEL_OCI_DIR" ]; then
+    cp -r /root/.oci "$VPSENTINEL_OCI_DIR"
+    [ ! -f "$VPSENTINEL_OCI_DIR/config" ] || sed -i 's|/root/.oci/|/var/lib/vpsentinel/oci/|g' "$VPSENTINEL_OCI_DIR/config"
+    chown -R vpsentinel:vpsentinel "$VPSENTINEL_OCI_DIR"
+    chmod -R go-rwx "$VPSENTINEL_OCI_DIR"
+fi
 # Initialize config.json if not present
-if [ ! -f "$INSTALL_DIR/config.json" ]; then
+if [ ! -f "$VPSENTINEL_CONFIG_PATH" ]; then
     echo ">>> Creating initial config.json from template..."
-    cp "$INSTALL_DIR/config.example.json" "$INSTALL_DIR/config.json"
+    install -m 0600 -o vpsentinel -g vpsentinel "$INSTALL_DIR/config.example.json" "$VPSENTINEL_CONFIG_PATH"
 fi
 
 # Install systemd service
@@ -83,8 +105,9 @@ echo ">>> Installing systemd unit file..."
 if [ -f "$INSTALL_DIR/systemd/vpsentinel.service" ]; then
     cp "$INSTALL_DIR/systemd/vpsentinel.service" /etc/systemd/system/vpsentinel.service
     ln -sf /etc/systemd/system/vpsentinel.service /etc/systemd/system/oracle-sentinel.service
+    cp "$INSTALL_DIR/systemd/vpsentinel-control.service" /etc/systemd/system/
     systemctl daemon-reload
-    systemctl enable vpsentinel
+    systemctl enable vpsentinel-control vpsentinel
 else
     cp "$INSTALL_DIR/systemd/oracle-sentinel.service" /etc/systemd/system/oracle-sentinel.service
     systemctl daemon-reload
@@ -132,18 +155,10 @@ if [ ! -f /etc/vpsentinel/cert/privkey.pem ] || [ ! -f /etc/vpsentinel/cert/full
     cp -n /etc/vpsentinel/cert/fullchain.pem /etc/vpsentinel/cert/cert.pem 2>/dev/null || true
 fi
 
-# Start or restart background service
-echo ">>> Starting VPSentinel service..."
-if systemctl is-enabled --quiet vpsentinel 2>/dev/null; then
-    systemctl restart vpsentinel
-else
-    systemctl restart oracle-sentinel 2>/dev/null || true
-fi
-
 SERVER_IP=$(curl -s4 --max-time 3 https://api.ipify.org 2>/dev/null || curl -s4 --max-time 3 https://icanhazip.com 2>/dev/null || echo "127.0.0.1")
 
 echo "===================================================================="
-echo "[OK] VPSentinel 核心服务已成功安装并启动就绪！"
+echo "[OK] VPSentinel 安装文件准备完成，正在初始化访问凭据。"
 echo "===================================================================="
 
 # Retrieve or generate random initial admin password (P0-4: No plaintext initial_password on disk)
@@ -158,7 +173,10 @@ sys.path.insert(0, '$INSTALL_DIR')
 try:
     from sentinel_core import ConfigManager
     from auth_mgr import AuthManager
+    import os
     cfg = ConfigManager.load()
+    if cfg.get('oci', {}).get('config_path', '').startswith('/root/.oci/'):
+        cfg['oci']['config_path'] = '/var/lib/vpsentinel/oci/config'
     sec = cfg.setdefault('security', {})
     sec.pop('initial_password', None)
     if sec.get('admin_password_hash'):
@@ -168,12 +186,34 @@ try:
         raw_pass = secrets.token_urlsafe(16)
         sec['admin_password_hash'] = AuthManager.hash_password(raw_pass)
         sec['must_change_password'] = True
+        sec.setdefault('session_secret', secrets.token_hex(32))
+        sec.setdefault('sub_token', secrets.token_hex(16))
+        sec.setdefault('mesh_token', secrets.token_hex(32))
         ConfigManager.save(cfg)
         print(raw_pass)
 except Exception:
     print('[ERROR]')
 " 2>/dev/null || echo "[ERROR]")
 
+# Permissions and authentication are ready before the first web process starts.
+chown vpsentinel:vpsentinel "$VPSENTINEL_CONFIG_PATH"
+chown -R vpsentinel:vpsentinel /etc/vpsentinel/cert
+chmod 0700 /etc/vpsentinel/cert
+chown -R root:root "$INSTALL_DIR"
+chmod -R go-w "$INSTALL_DIR"
+# Allow subscription reads without granting the Web process write access to 3x-ui.
+if [ -d /etc/x-ui ]; then
+    if ! command -v setfacl >/dev/null; then
+        if command -v apt-get >/dev/null; then apt-get install -y acl; fi
+    fi
+    command -v setfacl >/dev/null || { echo 'Install ACL utilities before enabling 3x-ui integration.' >&2; exit 1; }
+    setfacl -m u:vpsentinel:rx /etc/x-ui
+    setfacl -m d:u:vpsentinel:rX /etc/x-ui
+    [ ! -f /etc/x-ui/x-ui.db ] || setfacl -m u:vpsentinel:r /etc/x-ui/x-ui.db
+fi
+systemctl restart vpsentinel-control
+systemctl restart vpsentinel
+systemctl is-active --quiet vpsentinel || { echo 'VPSentinel failed to start; inspect the service logs.' >&2; exit 1; }
 echo "控制台访问信息："
 echo "  访问地址: https://${SERVER_IP}:20540/sentinel"
 echo "  初始账号: admin"

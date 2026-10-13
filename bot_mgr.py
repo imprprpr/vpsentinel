@@ -1,3 +1,4 @@
+from net_policy import open_secure, read_limited
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 # ==============================================================================
@@ -22,6 +23,7 @@ class TelegramInteractiveBot:
         self.get_state_func = get_state_func
         self.get_config_func = get_config_func
         self.run_healing_func = run_healing_func
+        self._loop = None
         self._running = False
         self._thread = None
         self._last_update_id = 0
@@ -34,7 +36,7 @@ class TelegramInteractiveBot:
             tg_cfg = cfg.get('notifications', {}).get('telegram', {})
             bot_token = tg_cfg.get('bot_token', '').strip()
             chat_id = str(tg_cfg.get('chat_id', '')).strip()
-            bot_enabled = cfg.get('notifications', {}).get('enabled', False) or bool(bot_token and chat_id)
+            bot_enabled = bool(tg_cfg.get('bot_enabled', False) and bot_token and chat_id)
             return bot_token, chat_id, bot_enabled
         except Exception as e:
             logger.error(f'Error reading telegram credentials: {e}')
@@ -54,8 +56,8 @@ class TelegramInteractiveBot:
         try:
             data = json.dumps(payload).encode('utf-8')
             req = urllib.request.Request(url, data=data, headers={"Content-Type": "application/json"})
-            with urllib.request.urlopen(req, timeout=10) as resp:
-                return json.loads(resp.read().decode('utf-8'))
+            with open_secure(req, timeout=10) as resp:
+                return json.loads(read_limited(resp).decode('utf-8'))
         except Exception as e:
             logger.error(f"Error sending TG message: {e}")
             return None
@@ -68,7 +70,7 @@ class TelegramInteractiveBot:
         try:
             data = json.dumps(payload).encode('utf-8')
             req = urllib.request.Request(url, data=data, headers={"Content-Type": "application/json"})
-            with urllib.request.urlopen(req, timeout=8) as resp:
+            with open_secure(req, timeout=8) as resp:
                 return True
         except Exception:
             return False
@@ -187,30 +189,10 @@ class TelegramInteractiveBot:
             try:
                 import asyncio
                 res = None
-                if self.run_healing_func:
-                    if asyncio.iscoroutinefunction(self.run_healing_func):
-                        try:
-                            loop = asyncio.get_running_loop()
-                        except RuntimeError:
-                            loop = None
-                        if loop and loop.is_running():
-                            fut = asyncio.run_coroutine_threadsafe(self.run_healing_func('MANUAL', force=True), loop)
-                            res = fut.result(timeout=60)
-                        else:
-                            res = asyncio.run(self.run_healing_func('MANUAL', force=True))
-                    else:
-                        res = self.run_healing_func(force=True)
-                else:
-                    import app
-                    try:
-                        loop = asyncio.get_running_loop()
-                    except RuntimeError:
-                        loop = None
-                    if loop and loop.is_running():
-                        fut = asyncio.run_coroutine_threadsafe(app.run_healing_routine('MANUAL', force=True), loop)
-                        res = fut.result(timeout=60)
-                    else:
-                        res = asyncio.run(app.run_healing_routine('MANUAL', force=True))
+                if not self.run_healing_func or not self._loop or not self._loop.is_running():
+                    raise RuntimeError('Healing control loop is unavailable')
+                future = asyncio.run_coroutine_threadsafe(self.run_healing_func('MANUAL', force=False), self._loop)
+                res = future.result(timeout=180)
 
                 if isinstance(res, dict) and res.get('ok'):
                     new_ip = res.get('new_ip', '未知')
@@ -235,7 +217,14 @@ class TelegramInteractiveBot:
         def _task():
             try:
                 import speedtest_mgr
-                res = speedtest_mgr.SpeedtestManager.run_full_benchmark()
+                manager = speedtest_mgr.speedtest_mgr
+                manager.start_benchmark()
+                deadline = time.monotonic() + 180
+                while manager.get_status().get('is_running') and time.monotonic() < deadline:
+                    time.sleep(1)
+                status = manager.get_status()
+                if status.get('is_running'): raise TimeoutError('Speedtest is still running')
+                res = status.get('last_result') or {}
                 results = res.get('results', [])
                 lines = [
                     "<b>三网回程网络基准测速报告</b>",
@@ -273,6 +262,13 @@ class TelegramInteractiveBot:
         self.send_message(bot_token, chat_id, msg, self.get_main_keyboard())
 
     def process_update(self, update, bot_token, admin_chat_id):
+        cfg = self.get_config_func() if callable(self.get_config_func) else {}
+        allowed = {str(v) for v in cfg.get('notifications', {}).get('telegram', {}).get('admin_user_ids', [])}
+        item = update.get('callback_query', update.get('message', {}))
+        sender = str(item.get('from', {}).get('id', ''))
+        # Private chats remain convenient; groups require an explicit sender allowlist.
+        if sender not in allowed and not (str(admin_chat_id).isdigit() and sender == str(admin_chat_id)):
+            return
         # 1. Handle Inline Button Clicks (callback_query)
         if "callback_query" in update:
             cb = update["callback_query"]
@@ -356,8 +352,8 @@ class TelegramInteractiveBot:
             try:
                 url = f"https://api.telegram.org/bot{bot_token}/getUpdates?offset={self._last_update_id}&timeout=20"
                 req = urllib.request.Request(url)
-                with urllib.request.urlopen(req, timeout=25) as resp:
-                    data = json.loads(resp.read().decode('utf-8'))
+                with open_secure(req, timeout=25) as resp:
+                    data = json.loads(read_limited(resp).decode('utf-8'))
                     if data.get("ok"):
                         for item in data.get("result", []):
                             update_id = item.get("update_id", 0)
@@ -371,6 +367,11 @@ class TelegramInteractiveBot:
                 time.sleep(3)
 
     def start(self):
+        import asyncio
+        try:
+            self._loop = asyncio.get_running_loop()
+        except RuntimeError:
+            self._loop = None
         if not self._running:
             self._running = True
             self._thread = threading.Thread(target=self._polling_loop, name="TGBotPollingDaemon", daemon=True)

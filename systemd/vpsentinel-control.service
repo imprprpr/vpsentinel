@@ -1,0 +1,23 @@
+[Unit]
+Description=VPSentinel restricted privileged operations
+After=network.target
+
+[Service]
+Type=simple
+UMask=0077
+User=root
+Group=vpsentinel
+WorkingDirectory=/opt/vpsentinel
+ExecStart=/opt/vpsentinel/venv/bin/python3 /opt/vpsentinel/privileged_helper.py
+RuntimeDirectory=vpsentinel-control
+RuntimeDirectoryMode=0750
+Restart=on-failure
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=-/etc/x-ui -/etc/vpsentinel/cert /run/vpsentinel-control
+RestrictAddressFamilies=AF_UNIX
+
+[Install]
+WantedBy=multi-user.target

@@ -6,6 +6,7 @@
 # ==============================================================================
 
 import os
+os.umask(0o077)
 import sys
 import json
 import time
@@ -29,12 +30,9 @@ C_BG_DARK = '\033[40m'
 SENTINEL_DIR = "/opt/vpsentinel" if os.path.exists("/opt/vpsentinel") else (
     "/opt/oracle-sentinel" if os.path.exists("/opt/oracle-sentinel") else "/opt/vpsentinel"
 )
-CONFIG_FILE = os.path.join(SENTINEL_DIR, "config.json")
-CERT_DIR = "/etc/vpsentinel/cert" if os.path.exists("/etc/vpsentinel/cert") else (
-    "/etc/oracle-sentinel/cert" if os.path.exists("/etc/oracle-sentinel/cert") else "/etc/vpsentinel/cert"
-)
-SERVICE_NAME = "vpsentinel" if os.path.exists("/etc/systemd/system/vpsentinel.service") else "oracle-sentinel"
-OCI_DIR = "/root/.oci"
+from paths import get_config_path, CERT_DIR, OCI_DIR
+CONFIG_FILE = get_config_path()
+SERVICE_NAME = "vpsentinel"
 
 def clear_screen():
     os.system('clear' if os.name == 'posix' else 'cls')
@@ -324,6 +322,9 @@ def step_cloudflare_config(current_ip):
 
 # --- STEP 5: SSL/TLS Certificate Provisioning ---
 def step_ssl_cert(cf_token, domain):
+    import re
+    if not re.fullmatch(r'[A-Za-z0-9.-]{1,253}', domain):
+        raise ValueError('Invalid domain')
     print(f"\n{C_MAGENTA}{C_BOLD}[步骤 5/7] SSL / TLS 证书自动签发 (DNS-01 零端口依赖){C_RESET}")
     print(f"{C_BLUE}────────────────────────────────────────────────────────────────────────────────────────{C_RESET}")
     os.makedirs(CERT_DIR, exist_ok=True)
@@ -345,7 +346,7 @@ def step_ssl_cert(cf_token, domain):
     if ans == 'y':
         log_info("正在安装/配置 acme.sh 零依赖证书自动化客户端...")
         if not shutil.which("acme.sh") and not os.path.exists("/root/.acme.sh/acme.sh"):
-            run_cmd("curl -fsSL https://get.acme.sh | sh -s email=admin@" + domain)
+            raise RuntimeError('Install a verified acme.sh release before requesting certificates')
         
         acme_bin = "/root/.acme.sh/acme.sh" if os.path.exists("/root/.acme.sh/acme.sh") else "acme.sh"
         log_info(f"正在静默申请 {domain} ECC 证书 (全程无需占用 80/443 端口)...")
@@ -365,6 +366,9 @@ def step_ssl_cert(cf_token, domain):
 
 # --- STEP 6: 3x-ui Golden Inbounds Auto-Provisioning ---
 def step_3x_ui_nodes(domain):
+    import re
+    if not re.fullmatch(r'[A-Za-z0-9.-]{1,253}', domain):
+        raise ValueError('Invalid domain')
     print(f"\n{C_MAGENTA}{C_BOLD}[步骤 6/7] 3x-ui 节点全家桶自动入库与初始化{C_RESET}")
     print(f"{C_BLUE}────────────────────────────────────────────────────────────────────────────────────────{C_RESET}")
     print(" 自动向 3x-ui 写入经过生产调优的『黄金三剑客』出海节点，装完免去任何面板手动配置：")

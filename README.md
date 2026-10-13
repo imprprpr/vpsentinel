@@ -1,5 +1,8 @@
 # VPSentinel
 
+> **2026-10-13 安全整改**：升级前请阅读 [升级与验证说明](docs/SECURITY-REMEDIATION-2026-10-13.md)。管理、订阅、Mesh 监控和证书同步使用不同凭证；新安装采用普通用户服务与受限本地辅助服务。
+
+
 <div align="center">
 
 <img src="docs/images/dashboard.png" alt="VPSentinel 控制中心仪表盘" width="100%" style="border-radius: 8px; border: 1px solid #27272a; margin-bottom: 16px;" />
@@ -52,17 +55,21 @@
 
 ---
 
-## 3 分钟极速新手指南 (Quick Start for Beginners)
+## 安装与首次配置 (Installation and Setup)
 
 小白用户仅需三步即可完成部署并获取可用节点订阅：
 
-### 第 1 步：在 VPS 执行一键安装命令
+### 第 1 步：核对源码版本并安装
 连接你的 VPS 终端（Ubuntu / Debian / CentOS / Oracle Linux），粘贴执行：
 ```bash
-curl -fsSL https://raw.githubusercontent.com/imprprpr/vpsentinel/main/scripts/install.sh | sudo bash
+git clone https://github.com/imprprpr/vpsentinel.git
+cd vpsentinel
+# 将下面的占位符替换为你已核对的完整提交 SHA；不要使用可变的 main 代替。
+git checkout --detach <已核对的40位提交SHA>
+sudo bash scripts/install.sh
 ```
 > [!NOTE]
-> 安装脚本会自动放行甲骨文云和系统防火墙端口、启动后台守卫服务，并在终端打印出专属访问地址与初始登录凭据。
+> 安装脚本会安装锁定并校验哈希的依赖，创建独立服务用户，在服务启动前初始化管理员密码，并在终端打印访问地址。3x-ui 和 acme.sh 需要事先安装已核对的版本；第三方二进制下载要求提供固定版本和可信 SHA-256。
 
 ### 第 2 步：打开浏览器进入控制台
 在浏览器中打开终端打印出的控制台地址：
@@ -106,7 +113,11 @@ https://<你的域名或IP>:20540/sentinel
 ### 方式二：终端一键安装（SSH 用户）
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/imprprpr/vpsentinel/main/scripts/install.sh | sudo bash
+git clone https://github.com/imprprpr/vpsentinel.git
+cd vpsentinel
+# 将下面的占位符替换为你已核对的完整提交 SHA；不要使用可变的 main 代替。
+git checkout --detach <已核对的40位提交SHA>
+sudo bash scripts/install.sh
 ```
 
 脚本会自动放行防火墙端口、开启 BBR、配置安全基线，并引导输入 Cloudflare Token 与通知凭据。

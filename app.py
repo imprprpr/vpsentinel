@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 import os
+from secure_files import transactional, config_transaction
 import sys
 import time
 import json
@@ -12,11 +13,11 @@ import threading
 import hmac
 import secrets
 import ipaddress
-from typing import List, Optional, Any
+from typing import List, Optional, Any, Literal
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Response, Request
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import HTMLResponse, FileResponse, JSONResponse
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel, field_validator, Field
 import requests
 
 import sentinel_core
@@ -196,12 +197,12 @@ def redact_notifications(notifications: dict) -> dict:
     return redacted
 
 class LoginRequest(BaseModel):
-    username: str
-    password: str
+    username: str = Field(min_length=1, max_length=128)
+    password: str = Field(min_length=1, max_length=1024)
 
 class UpdatePasswordRequest(BaseModel):
-    old_password: str
-    new_password: str
+    old_password: str = Field(min_length=1, max_length=1024)
+    new_password: str = Field(min_length=1, max_length=1024)
 
 class SecuritySettingsRequest(BaseModel):
     auth_enabled: Optional[bool] = None
@@ -209,21 +210,40 @@ class SecuritySettingsRequest(BaseModel):
     enable_host_guard: Optional[bool] = None
     regenerate_sub_token: Optional[bool] = None
 
+@app.exception_handler(OSError)
+async def persistence_error(request: Request, exc: OSError):
+    logger.error('Operation failed: %s', type(exc).__name__)
+    return JSONResponse(status_code=503, content={'detail': 'Storage or system operation failed; changes were not confirmed'})
+
 @app.middleware("http")
 async def security_middleware(request: Request, call_next):
     # Host Guard: Reject raw IP scans on public interface
     if not auth.check_host_guard(request):
         return Response(status_code=404, content=b"", headers={"Server": "nginx/1.22.1"})
 
+    if request.method not in ('GET', 'HEAD', 'OPTIONS') and request.cookies.get('sentinel_session'):
+        origin = request.headers.get('origin')
+        if origin:
+            from urllib.parse import urlsplit
+            if urlsplit(origin).netloc != request.headers.get('host'):
+                return JSONResponse(status_code=403, content={'detail': 'Cross-origin cookie mutation rejected'})
     cfg = cfg_mgr.load()
     trusted_cidrs = cfg.get("security", {}).get("trusted_proxy_cidrs", [])
     request.state.client_ip = resolve_client_ip(request, trusted_cidrs)
 
     response = await call_next(request)
+    response.headers['X-Content-Type-Options'] = 'nosniff'
+    response.headers['X-Frame-Options'] = 'DENY'
+    response.headers['Referrer-Policy'] = 'no-referrer'
+    if request.url.path.startswith('/api/'):
+        response.headers['Cache-Control'] = 'no-store'
     response.headers["Server"] = "nginx/1.22.1"
     return response
 
 def check_admin(request: Request):
+    sec = auth.get_security_config()
+    if sec.get('auth_enabled', True) and sec.get('must_change_password', False) and request.url.path not in ('/api/auth/update-password', '/api/auth/logout'):
+        raise HTTPException(status_code=403, detail='Change the initial administrator password first')
     if not auth.is_request_authenticated(request):
         raise HTTPException(status_code=401, detail="Administrator authentication required")
 
@@ -256,7 +276,7 @@ class ConnectionManager:
     async def broadcast(self, message: dict):
         for connection in list(self.active_connections):
             try:
-                await connection.send_json(message)
+                await asyncio.wait_for(connection.send_json(message), timeout=5)
             except Exception:
                 self.disconnect(connection)
 
@@ -286,9 +306,31 @@ async def broadcast_log(msg: str, level='INFO'):
     entry = log_event(msg, level)
     await ws_manager.broadcast({'type': 'log', 'data': entry})
 
+_managed_tasks = set()
+
+def create_managed_task(coro):
+    task = asyncio.create_task(coro)
+    _managed_tasks.add(task)
+    task.add_done_callback(_managed_tasks.discard)
+    return task
+
+@app.on_event('shutdown')
+async def shutdown_event():
+    for owner in (traffic_mgr.TrafficManager, mesh_mgr.MeshManager, cert_sync_mgr.CertSyncManager):
+        event = getattr(owner, '_stop_event', None)
+        if event: event.set()
+    bot = bot_mgr.get_bot_instance()
+    bot.stop()
+    tasks = list(_managed_tasks)
+    for task in tasks: task.cancel()
+    if tasks: await asyncio.gather(*tasks, return_exceptions=True)
+    for socket in list(ws_manager.active_connections):
+        await socket.close(code=1001)
+    ws_manager.active_connections.clear()
+
 @app.on_event('startup')
 async def startup_event():
-    asyncio.create_task(background_monitor_loop())
+    create_managed_task(background_monitor_loop())
     traffic_mgr.TrafficManager.start_background_collector(cfg_mgr.load, interval_sec=60)
     mesh_mgr.MeshManager.start_background_poller(interval_sec=60)
     cert_sync_mgr.CertSyncManager.start_background_poller(cfg_mgr.load)
@@ -299,12 +341,45 @@ async def startup_event():
     )
     bot.start()
 
+def retry_pending_dns():
+    cfg = cfg_mgr.load()
+    mon = cfg.get('monitor', {})
+    address = mon.get('last_reip_new_ip')
+    if not mon.get('dns_sync_pending') or not address:
+        return False
+    dns = sentinel_core.dns_settings(cfg)
+    if not dns.get('record_name'):
+        return False
+    if sentinel_core.get_dns_provider(cfg).update_dns_record(dns['record_name'], address):
+        def clear(current):
+            if current.get('monitor', {}).get('last_reip_new_ip') == address:
+                current['monitor']['dns_sync_pending'] = False
+        cfg_mgr.update(clear)
+        return True
+    return False
+
+
+def confirmed_inbound_failure(cfg):
+    url = cfg.get('monitor', {}).get('inbound_probe_url')
+    if not url:
+        return False
+    from net_policy import open_secure, read_json
+    import urllib.request
+    token = cfg.get('monitor', {}).get('inbound_probe_token', '')
+    request = urllib.request.Request(url, headers={'Authorization': 'Bearer ' + token})
+    with open_secure(request) as response:
+        result = read_json(response)
+    return result.get('inbound_reachable') is False and result.get('target_ip') == monitor.get_public_ip() and abs(time.time() - float(result.get('timestamp', 0))) < 120
+
+
 async def background_monitor_loop():
     logger.info('Starting background probe & monitor task...')
     loop = asyncio.get_running_loop()
     while True:
         try:
             cfg = cfg_mgr.load()
+            if cfg.get('monitor', {}).get('dns_sync_pending'):
+                await asyncio.to_thread(retry_pending_dns)
             state = await loop.run_in_executor(None, monitor.get_full_state)
             
             if not runtime_state['heal_in_progress']:
@@ -336,27 +411,27 @@ async def background_monitor_loop():
                 elif state['probes']['loss_pct'] >= loss_thresh:
                     monitor.consecutive_failures += 1
                     await broadcast_log(
-                        f'GFW Block threshold exceeded: {state["probes"]["loss_pct"]}% loss '
+                        f'Outbound probe loss threshold exceeded: {state["probes"]["loss_pct"]}% loss '
                         f'({monitor.consecutive_failures}/{consec_limit})',
                         'WARN'
                     )
                     if monitor.consecutive_failures >= consec_limit:
-                        if auto_heal_mode == 'reip_auto':
+                        if auto_heal_mode == 'reip_auto' and not cfg.get('monitor', {}).get('dns_sync_pending') and await asyncio.to_thread(confirmed_inbound_failure, cfg):
                             await broadcast_log('Triggering automated Re-IP self-healing routine!', 'WARN')
-                            notification.NotificationManager.broadcast(
+                            await asyncio.to_thread(notification.NotificationManager.broadcast,
                                 cfg,
                                 title="GFW Block Detected / 节点探针阻断告警",
                                 message=f"[GFW Block] Loss rate reached {state['probes']['loss_pct']}% across domestic probes.\nConsecutive failures: {monitor.consecutive_failures}/{consec_limit}.\nInitiating recovery sequence...",
                                 level="WARN"
                             )
-                            asyncio.create_task(run_healing_routine('AUTO'))
+                            create_managed_task(run_healing_routine('AUTO'))
                         else:
                             await broadcast_log(
-                                f'GFW Block confirmed ({state["probes"]["loss_pct"]}% loss). '
+                                f'Outbound probe failure confirmed ({state["probes"]["loss_pct"]}% loss). '
                                 f'Mode is notify_only: skipping automated Re-IP.',
                                 'WARN'
                             )
-                            notification.NotificationManager.broadcast(
+                            await asyncio.to_thread(notification.NotificationManager.broadcast,
                                 cfg,
                                 title="GFW Block Alert / 探针阻断告警 (仅通知)",
                                 message=f"[GFW Block] Loss rate reached {state['probes']['loss_pct']}%. Consecutive failures: {monitor.consecutive_failures}/{consec_limit}.\nMode is notify_only, manual review recommended.",
@@ -374,34 +449,43 @@ async def background_monitor_loop():
             await asyncio.sleep(5)
 
 class SettingsModel(BaseModel):
-    cf_token: Optional[str] = ''
-    cf_zone: Optional[str] = ''
-    cf_record: Optional[str] = ''
-    auto_heal: Optional[bool] = False
-    auto_heal_mode: Optional[str] = None
-    reip_cooldown_hours: Optional[int] = None
-    provider_type: Optional[str] = 'auto'
-    provider_hook: Optional[str] = ''
+    cf_token: Optional[str] = None
+    cf_zone: Optional[str] = None
+    cf_record: Optional[str] = None
+    auto_heal: Optional[bool] = None
+    auto_heal_mode: Optional[Literal['notify_only', 'reip_auto']] = None
+    reip_cooldown_hours: Optional[int] = Field(default=None, ge=0, le=720)
+    provider_type: Optional[Literal['auto', 'oracle', 'lightsail', 'hetzner', 'azure', 'hook', 'generic']] = None
+    provider_hook: Optional[str] = None
     lightsail: Optional[dict] = None
     hetzner: Optional[dict] = None
     azure: Optional[dict] = None
-    notifications_enabled: Optional[bool] = False
-    tg_enabled: Optional[bool] = False
-    tg_token: Optional[str] = ''
-    tg_chat_id: Optional[str] = ''
-    discord_enabled: Optional[bool] = False
-    discord_webhook: Optional[str] = ''
-    bark_enabled: Optional[bool] = False
-    bark_key: Optional[str] = ''
-    custom_webhook_enabled: Optional[bool] = False
-    custom_webhook_url: Optional[str] = ''
+    notifications_enabled: Optional[bool] = None
+    tg_enabled: Optional[bool] = None
+    tg_token: Optional[str] = None
+    tg_chat_id: Optional[str] = None
+    discord_enabled: Optional[bool] = None
+    discord_webhook: Optional[str] = None
+    bark_enabled: Optional[bool] = None
+    bark_key: Optional[str] = None
+    custom_webhook_enabled: Optional[bool] = None
+    custom_webhook_url: Optional[str] = None
     secret_path: Optional[str] = None
     enable_host_guard: Optional[bool] = None
 
+@app.get('/api/mesh/telemetry')
+async def mesh_telemetry(request: Request):
+    expected = auth.get_security_config().get('mesh_token', '')
+    supplied = request.headers.get('authorization', '').removeprefix('Bearer ').strip()
+    if not expected or not supplied or not hmac.compare_digest(supplied, expected):
+        raise HTTPException(status_code=401, detail='Mesh telemetry token required')
+    state = await asyncio.to_thread(monitor.get_full_state)
+    return {'state': {key: state.get(key) for key in ('public_ip', 'metrics', 'warp')}}
+
+
 @app.get('/api/status')
 async def get_status(request: Request):
-    if not auth.verify_subscription_access(request):
-        raise HTTPException(status_code=401, detail="Authentication required")
+    check_admin(request)
     cfg = cfg_mgr.load()
     loop = asyncio.get_running_loop()
     state = await loop.run_in_executor(None, monitor.get_full_state)
@@ -417,21 +501,21 @@ async def get_status(request: Request):
     }
 
 @app.get('/api/settings')
-async def get_settings(request: Request):
+def get_settings(request: Request):
     check_admin(request)
     cfg = cfg_mgr.load()
     token = cfg.get('cloudflare', {}).get('api_token', '')
     masked_token = f'{token[:4]}****{token[-4:]}' if len(token) > 8 else ('' if not token else '****')
     
     # Check OCI status
-    oci_mgr = sentinel_core.OracleManager(cfg.get('oci', {}).get('config_path'))
+    oci_mgr = sentinel_core.OracleManager(cfg.get('oci', {}).get('config_path')) if cfg.get('provider', {}).get('type') == 'oracle' else None
     oci_status = {
-        'ready': oci_mgr.client is not None,
-        'instance_id': oci_mgr.instance_id,
-        'vnic_id': oci_mgr.vnic_id,
-        'compartment_id': oci_mgr.compartment_id,
-        'region': oci_mgr.region,
-        'error': oci_mgr.init_error
+        'ready': oci_mgr is not None and oci_mgr.client is not None,
+        'instance_id': (oci_mgr.instance_id if oci_mgr else ''),
+        'vnic_id': (oci_mgr.vnic_id if oci_mgr else ''),
+        'compartment_id': (oci_mgr.compartment_id if oci_mgr else ''),
+        'region': (oci_mgr.region if oci_mgr else ''),
+        'error': oci_mgr.init_error if oci_mgr else ''
     }
 
     notify_cfg = cfg.get('notifications', {})
@@ -482,7 +566,8 @@ async def get_settings(request: Request):
     }
 
 @app.post('/api/settings')
-async def update_settings(data: SettingsModel, request: Request):
+@transactional
+def update_settings(data: SettingsModel, request: Request):
     check_admin(request)
     cfg = cfg_mgr.load()
     if data.cf_token:
@@ -555,51 +640,22 @@ async def update_settings(data: SettingsModel, request: Request):
     if data.enable_host_guard is not None:
         sec['enable_host_guard'] = data.enable_host_guard
 
-    if 'notifications' not in cfg:
-        cfg['notifications'] = {}
-    cfg['notifications']['enabled'] = bool(data.notifications_enabled)
-    
-    # Preserve existing secret tokens if masked or empty is submitted
-    existing_tg = cfg.get('notifications', {}).get('telegram', {})
-    new_tg_token = data.tg_token
-    if not new_tg_token or '****' in new_tg_token:
-        new_tg_token = existing_tg.get('bot_token', '')
-    
-    existing_discord = cfg.get('notifications', {}).get('discord', {})
-    new_discord_url = data.discord_webhook
-    if not new_discord_url or '****' in new_discord_url:
-        new_discord_url = existing_discord.get('webhook_url', '')
-
-    existing_bark = cfg.get('notifications', {}).get('bark', {})
-    new_bark_key = data.bark_key
-    if not new_bark_key or '****' in new_bark_key:
-        new_bark_key = existing_bark.get('bark_key', '')
-
-    cfg['notifications']['telegram'] = {
-        'enabled': bool(data.tg_enabled),
-        'bot_token': new_tg_token or '',
-        'chat_id': data.tg_chat_id or ''
-    }
-    cfg['notifications']['discord'] = {
-        'enabled': bool(data.discord_enabled),
-        'webhook_url': new_discord_url or ''
-    }
-    cfg['notifications']['bark'] = {
-        'enabled': bool(data.bark_enabled),
-        'bark_key': new_bark_key or ''
-    }
-    existing_custom = cfg.get('notifications', {}).get('custom_webhook', {})
-    new_custom_url = data.custom_webhook_url
-    if not new_custom_url or '****' in new_custom_url:
-        new_custom_url = existing_custom.get('url', '')
-
-    cfg['notifications']['custom_webhook'] = {
-        'enabled': bool(data.custom_webhook_enabled),
-        'url': new_custom_url or ''
-    }
+    notifications = cfg.setdefault('notifications', {})
+    if data.notifications_enabled is not None:
+        notifications['enabled'] = data.notifications_enabled
+    mappings = {'telegram': {'enabled': 'tg_enabled', 'bot_token': 'tg_token', 'chat_id': 'tg_chat_id'},
+                'discord': {'enabled': 'discord_enabled', 'webhook_url': 'discord_webhook'},
+                'bark': {'enabled': 'bark_enabled', 'bark_key': 'bark_key'},
+                'custom_webhook': {'enabled': 'custom_webhook_enabled', 'url': 'custom_webhook_url'}}
+    for channel, fields in mappings.items():
+        section = notifications.setdefault(channel, {})
+        for field, attribute in fields.items():
+            value = getattr(data, attribute)
+            if value is not None and not (isinstance(value, str) and '****' in value):
+                section[field] = value
 
     cfg_mgr.save(cfg)
-    await broadcast_log('System configuration updated successfully.')
+    log_event('System configuration updated successfully.')
     return {'status': 'ok'}
 
 @app.post('/api/notifications/test')
@@ -609,7 +665,7 @@ async def test_notifications(request: Request, data: Optional[dict] = None):
     if data and 'notifications' in data:
         cfg['notifications'] = data['notifications']
     
-    results = notification.NotificationManager.broadcast(
+    results = await asyncio.to_thread(notification.NotificationManager.broadcast,
         cfg,
         title="Probe Alert Test / 告警测试",
         message="Universal Sentinel notification channel test successful! All systems operational.\n全能哨兵消息推送测试成功，节点状态良好。",
@@ -618,7 +674,7 @@ async def test_notifications(request: Request, data: Optional[dict] = None):
     return {'status': 'ok', 'results': results}
 
 @app.post('/api/settings/test-cf')
-async def test_cf_token(data: dict, request: Request):
+def test_cf_token(data: dict, request: Request):
     check_admin(request)
     token = data.get('token') or cfg_mgr.load().get('cloudflare', {}).get('api_token')
     cf = sentinel_core.get_dns_provider({'dns': {'type': 'cloudflare', 'api_token': token}})
@@ -628,7 +684,7 @@ async def test_cf_token(data: dict, request: Request):
 # --- Authentication & Security Endpoints ---
 
 @app.post('/api/auth/login')
-async def login(req: LoginRequest, request: Request, response: Response):
+def login(req: LoginRequest, request: Request, response: Response):
     client_ip = getattr(request.state, "client_ip", "") or (request.client.host if request.client else "unknown")
     ok, token_or_msg = auth.authenticate_admin(req.username, req.password, client_ip=client_ip)
     if not ok:
@@ -655,7 +711,7 @@ async def login(req: LoginRequest, request: Request, response: Response):
     }
 
 @app.get('/api/auth/check')
-async def check_auth(request: Request):
+def check_auth(request: Request):
     sec = auth.get_security_config()
     authenticated = auth.is_request_authenticated(request)
     return {
@@ -668,12 +724,14 @@ async def check_auth(request: Request):
     }
 
 @app.post('/api/auth/logout')
-async def logout(response: Response):
+async def logout(request: Request, response: Response):
+    if auth.is_privileged_request(request):
+        await asyncio.to_thread(auth.revoke_sessions)
     response.delete_cookie(key="sentinel_session", path="/")
     return {"success": True}
 
 @app.post('/api/auth/update-password')
-async def update_password(req: UpdatePasswordRequest, request: Request, response: Response):
+def update_password(req: UpdatePasswordRequest, request: Request, response: Response):
     check_admin(request)
     sec = auth.get_security_config()
     current_user = sec.get("admin_username", "admin")
@@ -683,7 +741,7 @@ async def update_password(req: UpdatePasswordRequest, request: Request, response
         raise HTTPException(status_code=400, detail="原密码输入错误")
     
     if not auth.update_password(req.new_password):
-        raise HTTPException(status_code=400, detail="新密码长度不能少于 6 位")
+        raise HTTPException(status_code=400, detail="新密码长度必须为 12–1024 位")
     
     _, new_token = auth.authenticate_admin(current_user, req.new_password, client_ip=client_ip)
     response.set_cookie(
@@ -698,7 +756,7 @@ async def update_password(req: UpdatePasswordRequest, request: Request, response
     return {"success": True, "message": "管理员密码已更新"}
 
 @app.post('/api/auth/update-security')
-async def update_security(req: SecuritySettingsRequest, request: Request):
+def update_security(req: SecuritySettingsRequest, request: Request):
     check_admin(request)
     sec = auth.update_security_settings(req.model_dump(exclude_unset=True))
     return {"success": True, "security": sec}
@@ -706,7 +764,7 @@ async def update_security(req: SecuritySettingsRequest, request: Request):
 # --- Web Onboarding / Setup Wizard Endpoints ---
 
 class SetupSaveModel(BaseModel):
-    provider_type: str = 'auto'
+    provider_type: Literal['auto', 'oracle', 'lightsail', 'hetzner', 'azure', 'hook', 'generic'] = 'auto'
     provider_hook: Optional[str] = ''
     oci_config_text: Optional[str] = ''
     oci_key_path: Optional[str] = ''
@@ -730,7 +788,7 @@ class ProviderTestModel(BaseModel):
     azure: Optional[dict] = None
 
 @app.get('/api/setup/status')
-async def setup_status(request: Request):
+def setup_status(request: Request):
     cfg = cfg_mgr.load()
     is_init = cfg.get('initialized', False) or bool(cfg.get('cloudflare', {}).get('api_token'))
     is_authed = auth.is_request_authenticated(request)
@@ -782,7 +840,7 @@ async def setup_status(request: Request):
     }
 
 @app.post('/api/provider/test')
-async def test_provider_endpoint(data: ProviderTestModel, request: Request):
+def test_provider_endpoint(data: ProviderTestModel, request: Request):
     check_setup_allowed(request)
     ptype = data.provider_type
     try:
@@ -857,7 +915,7 @@ async def test_provider_endpoint(data: ProviderTestModel, request: Request):
         return {'success': False, 'message': str(e)}
 
 @app.post('/api/setup/verify-cf')
-async def verify_cf(data: dict, request: Request):
+def verify_cf(data: dict, request: Request):
     check_setup_allowed(request)
     token = data.get('token', '').strip()
     if not token:
@@ -867,7 +925,7 @@ async def verify_cf(data: dict, request: Request):
     return {'success': ok, 'zones': zones, 'message': msg}
 
 @app.post('/api/setup/generate-key')
-async def generate_key(request: Request):
+def generate_key(request: Request):
     check_setup_allowed(request)
     try:
         pub_key, key_path = sentinel_core.generate_rsa_keypair()
@@ -876,81 +934,82 @@ async def generate_key(request: Request):
         return {'success': False, 'message': str(e)}
 
 @app.post('/api/setup/save')
-async def complete_setup(data: SetupSaveModel, request: Request):
+def complete_setup(data: SetupSaveModel, request: Request):
     check_setup_allowed(request)
-    cfg = cfg_mgr.load()
-    cfg['initialized'] = True
-    cfg['provider'] = {
-        'type': data.provider_type,
-        'hook_cmd': data.provider_hook or ''
-    }
-    if data.cf_token:
-        cfg['cloudflare']['api_token'] = data.cf_token
-    if data.cf_zone:
-        cfg['cloudflare']['zone_name'] = data.cf_zone
-    if data.cf_record:
-        cfg['cloudflare']['record_name'] = data.cf_record
+    with config_transaction():
+        cfg = cfg_mgr.load()
+        cfg['initialized'] = True
+        cfg['provider'] = {
+            'type': data.provider_type,
+            'hook_cmd': data.provider_hook or ''
+        }
+        if data.cf_token:
+            cfg['cloudflare']['api_token'] = data.cf_token
+        if data.cf_zone:
+            cfg['cloudflare']['zone_name'] = data.cf_zone
+        if data.cf_record:
+            cfg['cloudflare']['record_name'] = data.cf_record
     
-    cfg['monitor']['auto_heal_enabled'] = data.auto_heal
+        cfg['monitor']['auto_heal_enabled'] = data.auto_heal
     
-    # If OCI config provided
-    if data.provider_type == 'oracle' and data.oci_config_text:
-        key_path = data.oci_key_path or '/root/.oci/oci_api_key.pem'
-        try:
-            cfg_path = sentinel_core.save_oci_config(data.oci_config_text, key_path)
-            cfg['oci']['config_path'] = cfg_path
-            cfg['oci']['auth_method'] = 'config_file'
-        except Exception as e:
-            logger.warning(f"Error saving OCI config: {e}")
+        # If OCI config provided
+        if data.provider_type == 'oracle' and data.oci_config_text:
+            key_path = data.oci_key_path or os.path.join(sentinel_core.OCI_DIR, 'oci_api_key.pem')
+            try:
+                cfg_path = sentinel_core.save_oci_config(data.oci_config_text, key_path)
+                cfg['oci']['config_path'] = cfg_path
+                cfg['oci']['auth_method'] = 'config_file'
+            except Exception as e:
+                logger.warning(f"Error saving OCI config: {e}")
 
-    if data.lightsail:
-        cur_ls = cfg.setdefault('lightsail', {})
-        sec_k = data.lightsail.get('secret_access_key', '')
-        if not sec_k or '****' in sec_k:
-            sec_k = cur_ls.get('secret_access_key', '')
-        ak_id = data.lightsail.get('access_key_id', '')
-        if not ak_id or '****' in ak_id:
-            ak_id = cur_ls.get('access_key_id', '')
-        cfg['lightsail'] = {
-            'access_key_id': ak_id,
-            'secret_access_key': sec_k,
-            'region': data.lightsail.get('region') or cur_ls.get('region', 'us-east-1'),
-            'instance_name': data.lightsail.get('instance_name') or cur_ls.get('instance_name', '')
-        }
+        if data.lightsail:
+            cur_ls = cfg.setdefault('lightsail', {})
+            sec_k = data.lightsail.get('secret_access_key', '')
+            if not sec_k or '****' in sec_k:
+                sec_k = cur_ls.get('secret_access_key', '')
+            ak_id = data.lightsail.get('access_key_id', '')
+            if not ak_id or '****' in ak_id:
+                ak_id = cur_ls.get('access_key_id', '')
+            cfg['lightsail'] = {
+                'access_key_id': ak_id,
+                'secret_access_key': sec_k,
+                'region': data.lightsail.get('region') or cur_ls.get('region', 'us-east-1'),
+                'instance_name': data.lightsail.get('instance_name') or cur_ls.get('instance_name', '')
+            }
 
-    if data.hetzner:
-        cur_hz = cfg.setdefault('hetzner', {})
-        tok = data.hetzner.get('api_token', '')
-        if not tok or '****' in tok:
-            tok = cur_hz.get('api_token', '')
-        cfg['hetzner'] = {
-            'api_token': tok,
-            'server_id': data.hetzner.get('server_id') or cur_hz.get('server_id', ''),
-            'ip_type': data.hetzner.get('ip_type') or cur_hz.get('ip_type', 'primary')
-        }
+        if data.hetzner:
+            cur_hz = cfg.setdefault('hetzner', {})
+            tok = data.hetzner.get('api_token', '')
+            if not tok or '****' in tok:
+                tok = cur_hz.get('api_token', '')
+            cfg['hetzner'] = {
+                'api_token': tok,
+                'server_id': data.hetzner.get('server_id') or cur_hz.get('server_id', ''),
+                'ip_type': data.hetzner.get('ip_type') or cur_hz.get('ip_type', 'primary')
+            }
 
-    if data.azure:
-        cur_az = cfg.setdefault('azure', {})
-        csec = data.azure.get('client_secret', '')
-        if not csec or '****' in csec:
-            csec = cur_az.get('client_secret', '')
-        cid = data.azure.get('client_id', '')
-        if not cid or '****' in cid:
-            cid = cur_az.get('client_id', '')
-        cfg['azure'] = {
-            'subscription_id': data.azure.get('subscription_id') or cur_az.get('subscription_id', ''),
-            'resource_group': data.azure.get('resource_group') or cur_az.get('resource_group', ''),
-            'vm_name': data.azure.get('vm_name') or cur_az.get('vm_name', ''),
-            'nic_name': data.azure.get('nic_name') or cur_az.get('nic_name', ''),
-            'client_id': cid,
-            'client_secret': csec,
-            'tenant_id': data.azure.get('tenant_id') or cur_az.get('tenant_id', '')
-        }
+        if data.azure:
+            cur_az = cfg.setdefault('azure', {})
+            csec = data.azure.get('client_secret', '')
+            if not csec or '****' in csec:
+                csec = cur_az.get('client_secret', '')
+            cid = data.azure.get('client_id', '')
+            if not cid or '****' in cid:
+                cid = cur_az.get('client_id', '')
+            cfg['azure'] = {
+                'subscription_id': data.azure.get('subscription_id') or cur_az.get('subscription_id', ''),
+                'resource_group': data.azure.get('resource_group') or cur_az.get('resource_group', ''),
+                'vm_name': data.azure.get('vm_name') or cur_az.get('vm_name', ''),
+                'nic_name': data.azure.get('nic_name') or cur_az.get('nic_name', ''),
+                'client_id': cid,
+                'client_secret': csec,
+                'tenant_id': data.azure.get('tenant_id') or cur_az.get('tenant_id', '')
+            }
 
-    if data.notifications:
-        cfg['notifications'] = data.notifications
+        if data.notifications:
+            cfg['notifications'] = data.notifications
 
-    cfg_mgr.save(cfg)
+        cfg_mgr.save(cfg)
 
     # Optionally provision 3x-ui inbounds
     if data.provision_nodes and data.cf_record:
@@ -963,62 +1022,66 @@ async def complete_setup(data: SetupSaveModel, request: Request):
         except Exception as e:
             logger.warning(f"Auto-provision nodes warning: {e}")
 
-    await broadcast_log('Web 初始化向导配置已完成，Sentinel 引擎已全面接管自愈守护！', 'INFO')
+    log_event('Web 初始化向导配置已完成，Sentinel 引擎已全面接管自愈守护！', 'INFO')
     return {'success': True, 'message': 'Setup completed successfully'}
 
 class QuickStartRequest(BaseModel):
-    outbound_mode: str = 'edgetunnel'
-    admin_password: Optional[str] = None
+    outbound_mode: Literal['edgetunnel', 'native'] = 'edgetunnel'
+    admin_password: Optional[str] = Field(default=None, min_length=12, max_length=1024)
     pages_domain: Optional[str] = None
     pages_uuid: Optional[str] = None
     worker_domain: Optional[str] = None
     worker_uuid: Optional[str] = None
 
 @app.post('/api/setup/quick-start')
-async def quick_start_setup(data: QuickStartRequest, request: Request):
+def quick_start_setup(data: QuickStartRequest, request: Request):
     check_setup_allowed(request)
-    cfg = cfg_mgr.load()
-    cfg['initialized'] = True
-    cfg.setdefault('provider', {})['type'] = 'auto'
-    cfg.setdefault('monitor', {})['auto_heal_enabled'] = True
+    with config_transaction():
+        cfg = cfg_mgr.load()
+        cfg['initialized'] = True
+        cfg.setdefault('provider', {})['type'] = 'auto'
+        cfg.setdefault('monitor', {})['auto_heal_enabled'] = True
 
-    sec = cfg.setdefault('security', {})
-    if data.admin_password and len(data.admin_password.strip()) >= 6:
-        sec['admin_password_hash'] = auth.hash_password(data.admin_password.strip())
-        sec['session_secret'] = secrets.token_hex(32)
+        sec = cfg.setdefault('security', {})
+        if data.admin_password and 12 <= len(data.admin_password.strip()) <= 1024:
+            sec['admin_password_hash'] = auth.hash_password(data.admin_password.strip())
+            sec['session_secret'] = secrets.token_hex(32)
+            sec['must_change_password'] = False
 
-    if not sec.get('sub_token'):
-        sec['sub_token'] = secrets.token_hex(16)
-    sub_token = sec['sub_token']
+        if not sec.get('sub_token'):
+            sec['sub_token'] = secrets.token_hex(16)
+        sub_token = sec['sub_token']
 
-    if data.outbound_mode == 'edgetunnel':
-        edt = cfg.setdefault('edgetunnel', {})
-        edt['enabled'] = True
-        if data.pages_domain:
-            edt['pages_domain'] = clean_ip_mgr.sanitize_domain(data.pages_domain)
-        if data.pages_uuid:
-            clean_uuid = clean_ip_mgr.validate_uuid(data.pages_uuid) or data.pages_uuid.strip()
-            edt['pages_uuid'] = clean_uuid
-        if data.worker_domain:
-            edt['worker_domain'] = clean_ip_mgr.sanitize_domain(data.worker_domain)
-        if data.worker_uuid:
-            clean_w_uuid = clean_ip_mgr.validate_uuid(data.worker_uuid) or data.worker_uuid.strip()
-            edt['worker_uuid'] = clean_w_uuid
-        clean_ip_mgr.CleanIPManager.refresh_clean_ips(active_test=False)
-    else:
-        cfg.setdefault('edgetunnel', {})['enabled'] = False
-        try:
-            script_path = os.path.join(BASE_DIR, 'scripts')
-            if script_path not in sys.path:
-                sys.path.insert(0, script_path)
-            import node_provisioner
-            node_provisioner.provision_nodes()
-        except Exception as e:
-            logger.warning(f"Native nodes auto-provision note: {e}")
+        if data.outbound_mode == 'edgetunnel':
+            edt = cfg.setdefault('edgetunnel', {})
+            edt['enabled'] = True
+            if data.pages_domain:
+                edt['pages_domain'] = clean_ip_mgr.sanitize_domain(data.pages_domain)
+            if data.pages_uuid:
+                clean_uuid = clean_ip_mgr.validate_uuid(data.pages_uuid)
+                if not clean_uuid: raise HTTPException(status_code=422, detail='Invalid Pages UUID')
+                edt['pages_uuid'] = clean_uuid
+            if data.worker_domain:
+                edt['worker_domain'] = clean_ip_mgr.sanitize_domain(data.worker_domain)
+            if data.worker_uuid:
+                clean_w_uuid = clean_ip_mgr.validate_uuid(data.worker_uuid)
+                if not clean_w_uuid: raise HTTPException(status_code=422, detail='Invalid Worker UUID')
+                edt['worker_uuid'] = clean_w_uuid
+            clean_ip_mgr.CleanIPManager.refresh_clean_ips(active_test=False)
+        else:
+            cfg.setdefault('edgetunnel', {})['enabled'] = False
+            try:
+                script_path = os.path.join(BASE_DIR, 'scripts')
+                if script_path not in sys.path:
+                    sys.path.insert(0, script_path)
+                import node_provisioner
+                node_provisioner.provision_nodes()
+            except Exception as e:
+                logger.warning(f"Native nodes auto-provision note: {e}")
 
-    cfg_mgr.save(cfg)
+        cfg_mgr.save(cfg)
 
-    await broadcast_log('Web 极速向导配置已完成，系统已就绪！', 'INFO')
+    log_event('Web 极速向导配置已完成，系统已就绪！', 'INFO')
     return {
         'success': True,
         'message': 'Quick start setup completed successfully',
@@ -1033,7 +1096,7 @@ async def quick_start_setup(data: QuickStartRequest, request: Request):
 # --- Subscription Engine Endpoints ---
 
 @app.api_route('/sub/clash', methods=['GET', 'HEAD'])
-async def get_clash_sub(request: Request):
+def get_clash_sub(request: Request):
     if not auth.verify_subscription_access(request):
         raise HTTPException(status_code=403, detail="订阅 Token 无效或未提供，拒绝访问")
     yaml_content = sub_engine.SubEngine.generate_clash_yaml()
@@ -1047,7 +1110,7 @@ async def get_clash_sub(request: Request):
 @app.api_route('/sub/v2ray', methods=['GET', 'HEAD'])
 @app.api_route('/sub/base64', methods=['GET', 'HEAD'])
 @app.api_route('/sub/shadowrocket', methods=['GET', 'HEAD'])
-async def get_v2ray_sub(request: Request):
+def get_v2ray_sub(request: Request):
     if not auth.verify_subscription_access(request):
         raise HTTPException(status_code=403, detail="订阅 Token 无效或未提供，拒绝访问")
     b64_content = sub_engine.SubEngine.generate_v2ray_base64()
@@ -1059,7 +1122,7 @@ async def get_v2ray_sub(request: Request):
     return Response(content=b64_content, media_type='text/plain; charset=utf-8', headers=headers)
 
 @app.api_route('/sub/singbox', methods=['GET', 'HEAD'])
-async def get_singbox_sub(request: Request):
+def get_singbox_sub(request: Request):
     if not auth.verify_subscription_access(request):
         raise HTTPException(status_code=403, detail="订阅 Token 无效或未提供，拒绝访问")
     json_content = sub_engine.SubEngine.generate_singbox_json()
@@ -1070,15 +1133,15 @@ async def get_singbox_sub(request: Request):
     return Response(content=json_content, media_type='application/json; charset=utf-8', headers=headers)
 
 @app.get('/api/sub/rules')
-async def get_sub_rules(request: Request):
+def get_sub_rules(request: Request):
     check_admin(request)
     return sub_engine.SubEngine.get_rules_config()
 
 @app.post('/api/sub/rules')
-async def set_sub_rules(rules: dict, request: Request):
+def set_sub_rules(rules: dict, request: Request):
     check_admin(request)
     sub_engine.SubEngine.save_rules_config(rules)
-    await broadcast_log('Subscription routing rules updated successfully.')
+    log_event('Subscription routing rules updated successfully.')
     return {'status': 'ok', 'rules': rules}
 
 # --- Transit / Relay Endpoints ---
@@ -1090,6 +1153,12 @@ class TransitCreateModel(BaseModel):
     reality_port: int = 28443
     trojan_port: int = 22083
 
+    @field_validator('host')
+    @classmethod
+    def validate_host(cls, value):
+        from validation import host
+        return host(value)
+
     @field_validator('hy2_port', 'reality_port', 'trojan_port')
     @classmethod
     def validate_ports(cls, v):
@@ -1098,12 +1167,12 @@ class TransitCreateModel(BaseModel):
         return v
 
 @app.get('/api/transits')
-async def list_transits(request: Request):
+def list_transits(request: Request):
     check_admin(request)
     return transit_mgr.TransitManager.get_transits()
 
 @app.post('/api/transits')
-async def create_transit(item: TransitCreateModel, request: Request):
+def create_transit(item: TransitCreateModel, request: Request):
     check_admin(request)
     res = transit_mgr.TransitManager.add_transit(
         name=item.name,
@@ -1112,25 +1181,25 @@ async def create_transit(item: TransitCreateModel, request: Request):
         reality_port=item.reality_port,
         trojan_port=item.trojan_port
     )
-    await broadcast_log(f'Added new transit relay node: {item.name} ({item.host})')
+    log_event(f'Added new transit relay node: {item.name} ({item.host})')
     return {'status': 'ok', 'transit': res}
 
 @app.delete('/api/transits/{transit_id}')
-async def delete_transit(transit_id: str, request: Request):
+def delete_transit(transit_id: str, request: Request):
     check_admin(request)
     transit_mgr.TransitManager.delete_transit(transit_id)
-    await broadcast_log(f'Removed transit relay node ID: {transit_id}')
+    log_event(f'Removed transit relay node ID: {transit_id}')
     return {'status': 'ok'}
 
 @app.post('/api/transits/{transit_id}/toggle')
-async def toggle_transit(transit_id: str, data: dict, request: Request):
+def toggle_transit(transit_id: str, data: dict, request: Request):
     check_admin(request)
     enabled = data.get('enabled', True)
     transit_mgr.TransitManager.toggle_transit(transit_id, enabled)
     return {'status': 'ok'}
 
 @app.get('/scripts/setup-relay.sh')
-async def get_relay_script():
+def get_relay_script():
     domain = sub_engine.SubEngine.get_server_domain()
     script = transit_mgr.TransitManager.generate_realm_script(domain)
     return Response(content=script, media_type='text/x-shellscript')
@@ -1138,30 +1207,30 @@ async def get_relay_script():
 # --- Custom Standalone Nodes Endpoints ---
 
 @app.get('/api/custom-nodes')
-async def list_custom_nodes(request: Request):
+def list_custom_nodes(request: Request):
     check_admin(request)
     return custom_node_mgr.CustomNodeManager.get_custom_nodes()
 
 @app.post('/api/custom-nodes')
-async def create_custom_node(item: dict, request: Request):
+def create_custom_node(item: dict, request: Request):
     check_admin(request)
     try:
         res = custom_node_mgr.CustomNodeManager.add_custom_node(item)
-        await broadcast_log(f'Added custom node: {res.get("name")} ({res.get("server")}:{res.get("port")})')
+        log_event(f'Added custom node: {res.get("name")} ({res.get("server")}:{res.get("port")})')
         return {'status': 'ok', 'node': res}
     except Exception as e:
         logger.error(f'Failed to add custom node: {e}')
         raise HTTPException(status_code=400, detail=str(e))
 
 @app.delete('/api/custom-nodes/{node_id}')
-async def delete_custom_node(node_id: str, request: Request):
+def delete_custom_node(node_id: str, request: Request):
     check_admin(request)
     custom_node_mgr.CustomNodeManager.delete_custom_node(node_id)
-    await broadcast_log(f'Removed custom node ID: {node_id}')
+    log_event(f'Removed custom node ID: {node_id}')
     return {'status': 'ok'}
 
 @app.post('/api/custom-nodes/{node_id}/toggle')
-async def toggle_custom_node(node_id: str, data: dict, request: Request):
+def toggle_custom_node(node_id: str, data: dict, request: Request):
     check_admin(request)
     enabled = data.get('enabled', True)
     custom_node_mgr.CustomNodeManager.toggle_custom_node(node_id, enabled)
@@ -1169,7 +1238,7 @@ async def toggle_custom_node(node_id: str, data: dict, request: Request):
 
 # --- EdgeTunnel (EDT) Integration API ---
 @app.get('/api/edt/config')
-async def get_edt_config(request: Request):
+def get_edt_config(request: Request):
     check_admin(request)
     cfg = cfg_mgr.load()
     edt = cfg.get('edgetunnel', {})
@@ -1192,7 +1261,7 @@ async def get_edt_config(request: Request):
     }
 
 @app.post('/api/edt/config')
-async def save_edt_config(data: dict, request: Request):
+def save_edt_config(data: dict, request: Request):
     check_admin(request)
     cfg = cfg_mgr.load()
     if 'edgetunnel' not in cfg:
@@ -1211,22 +1280,22 @@ async def save_edt_config(data: dict, request: Request):
     else:
         cfg_mgr.save(cfg)
 
-    await broadcast_log('EdgeTunnel configuration updated.')
+    log_event('EdgeTunnel configuration updated.')
     return {'status': 'ok', 'message': 'EdgeTunnel configuration saved successfully'}
 
 @app.post('/api/edt/refresh-clean-ips')
-async def refresh_edt_clean_ips(request: Request):
+def refresh_edt_clean_ips(request: Request):
     check_admin(request)
     try:
         updated = clean_ip_mgr.CleanIPManager.refresh_clean_ips(active_test=False)
-        await broadcast_log('Refreshed EdgeTunnel Clean IP pools.')
+        log_event('Refreshed EdgeTunnel Clean IP pools.')
         return {'status': 'ok', 'clean_ips': updated}
     except Exception as e:
         logger.error(f'Failed to refresh clean IPs: {e}')
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get('/api/edt/status')
-async def get_edt_status(request: Request):
+def get_edt_status(request: Request):
     check_admin(request)
     endpoints = mesh_mgr.MeshManager.get_serverless_endpoints()
     results = []
@@ -1238,7 +1307,7 @@ async def get_edt_status(request: Request):
     return {'status': 'ok', 'endpoints': results}
 
 @app.get('/api/services')
-async def get_services(request: Request):
+def get_services(request: Request):
     check_admin(request)
     xui_base_path = '/'
     xui_port = 20530
@@ -1359,7 +1428,7 @@ async def run_healing_routine(trigger_source='MANUAL', force=False) -> dict:
             msg = f"Daily Re-IP quota exceeded ({len(reip_history)}/{max_reip} in last 24h). Trigger aborted."
             logger.warning(msg)
             await broadcast_log(f'[WARN] {msg}', 'WARN')
-            notification.NotificationManager.broadcast(
+            await asyncio.to_thread(notification.NotificationManager.broadcast,
                 cfg,
                 title="Re-IP Quota Exceeded / 换IP已达每日上限",
                 message=msg,
@@ -1373,7 +1442,7 @@ async def run_healing_routine(trigger_source='MANUAL', force=False) -> dict:
             msg = f"Auto Re-IP suppressed by cooldown circuit breaker. Last Re-IP cooldown has {rem_h}h remaining ({cooldown_hours}h window)."
             logger.warning(msg)
             await broadcast_log(f'[WARN] {msg}', 'WARN')
-            notification.NotificationManager.broadcast(
+            await asyncio.to_thread(notification.NotificationManager.broadcast,
                 cfg,
                 title="Re-IP Cooldown Active / 换IP保护中",
                 message=msg,
@@ -1382,22 +1451,35 @@ async def run_healing_routine(trigger_source='MANUAL', force=False) -> dict:
             monitor.consecutive_failures = 0
             return {'ok': False, 'error': msg, 'duration_sec': 0.0, 'new_ip': '', 'dns_ok': False}
 
+    import uuid
+    operation_id = uuid.uuid4().hex
+    def reserve(current):
+        operation = current.setdefault('monitor', {}).get('healing_operation', {})
+        if operation.get('phase') in ('changing_ip', 'allocated', 'uncertain') or (operation.get('phase') == 'preflight' and time.time() - operation.get('started_at', 0) < 600):
+            raise RuntimeError('A previous IP operation needs reconciliation before another attempt')
+        current['monitor']['healing_operation'] = {'id': operation_id, 'phase': 'preflight', 'started_at': now}
     runtime_state['heal_in_progress'] = True
+    try:
+        await asyncio.to_thread(cfg_mgr.update, reserve)
+    except Exception as exc:
+        runtime_state['heal_in_progress'] = False
+        return {'ok': False, 'error': str(exc), 'new_ip': '', 'duration_sec': 0, 'dns_ok': False}
     runtime_state['status'] = 'healing'
 
-    old_ip = monitor.get_public_ip()
-    await broadcast_log(f'[HEAL STEP 1/5] Initiated {trigger_source} Re-IP rebirth routine (current IP: {old_ip})...', 'WARN')
-    await asyncio.sleep(1)
-
-    cf_token = cfg.get('cloudflare', {}).get('api_token')
-    cf_zone = cfg.get('cloudflare', {}).get('zone_name', '')
-    cf_record = cfg.get('cloudflare', {}).get('record_name', '')
-
-    cloud_prov = sentinel_core.get_cloud_provider(cfg)
-    prov_name = cloud_prov.get_name()
-    loop = asyncio.get_running_loop()
-
+    prov_name = 'uninitialized'
     try:
+        old_ip = await asyncio.to_thread(monitor.get_public_ip)
+        await broadcast_log(f'[HEAL STEP 1/5] Initiated {trigger_source} Re-IP rebirth routine (current IP: {old_ip})...', 'WARN')
+        await asyncio.sleep(1)
+
+        cf_token = sentinel_core.dns_settings(cfg).get('api_token')
+        cf_zone = sentinel_core.dns_settings(cfg).get('zone_name', '')
+        cf_record = sentinel_core.dns_settings(cfg).get('record_name', '')
+
+        cloud_prov = await asyncio.to_thread(sentinel_core.get_cloud_provider, cfg)
+        prov_name = cloud_prov.get_name()
+        loop = asyncio.get_running_loop()
+
         # P1-10 Pre-flight check before releasing current IP
         await broadcast_log(f'[HEAL PRE-FLIGHT] Validating credentials and connectivity for {prov_name}...')
         conn_ok, conn_msg = await loop.run_in_executor(None, cloud_prov.test_connection)
@@ -1405,7 +1487,7 @@ async def run_healing_routine(trigger_source='MANUAL', force=False) -> dict:
             err_msg = f"Pre-flight provider validation failed: {conn_msg}. Aborting IP rebirth to prevent instance isolation."
             logger.error(err_msg)
             await broadcast_log(f'[ERROR] {err_msg}', 'ERROR')
-            notification.NotificationManager.broadcast(
+            await asyncio.to_thread(notification.NotificationManager.broadcast,
                 cfg,
                 title="Healing Pre-Flight Failed / 自动修复预检失败",
                 message=err_msg,
@@ -1415,15 +1497,28 @@ async def run_healing_routine(trigger_source='MANUAL', force=False) -> dict:
             dt = round(time.time() - t_start, 1)
             return {'ok': False, 'error': err_msg, 'duration_sec': dt, 'new_ip': '', 'dns_ok': False}
 
+        def mark_changing(current):
+            mon = current.setdefault('monitor', {})
+            mon['healing_operation'].update(phase='changing_ip', old_ip=old_ip)
+            hist = [t for t in mon.get('reip_history', []) if time.time() - t < 86400]
+            mon['reip_history'] = hist + [int(time.time())]
+            mon['last_reip_timestamp'] = int(time.time())
+        await asyncio.to_thread(cfg_mgr.update, mark_changing)
         # Step 2: IP swap via Provider
         await broadcast_log(f'[HEAL STEP 2/5] Initiating IP rebirth via provider: {prov_name}...')
         new_ip = await loop.run_in_executor(None, cloud_prov.change_public_ip)
+        def mark_allocated(current):
+            mon = current.setdefault('monitor', {})
+            mon['healing_operation'].update(phase='allocated', new_ip=new_ip)
+            mon['last_reip_new_ip'] = new_ip
+            mon['dns_sync_pending'] = bool(cf_record)
+        await asyncio.to_thread(cfg_mgr.update, mark_allocated)
         await broadcast_log(f'[HEAL STEP 3/5] Fresh Public IP acquired: {new_ip}', 'INFO')
         await asyncio.sleep(1)
 
         # Step 3: Cloudflare DNS update
         dns_ok = False
-        if cf_token and cf_record:
+        if cf_record and (cf_token or sentinel_core.dns_settings(cfg).get('type') == 'webhook'):
             await broadcast_log(f'[HEAL STEP 4/5] Updating Cloudflare DNS: {cf_record} -> {new_ip}...')
             cf_mgr = sentinel_core.get_dns_provider(cfg, cf_zone)
             try:
@@ -1443,19 +1538,20 @@ async def run_healing_routine(trigger_source='MANUAL', force=False) -> dict:
         await broadcast_log('[HEAL STEP 5/5] Verifying edge routing, external egress IP & health state...')
         actual_ip = await loop.run_in_executor(None, monitor.get_public_ip)
         ip_matched = (actual_ip == new_ip) if actual_ip and actual_ip != '127.0.0.1' else False
-        dns_required = bool(cf_token and cf_record)
+        dns_required = bool(cf_record)
         dns_matched = (not dns_required) or dns_ok
 
         # Update persistent history and Re-IP state in config atomically
         def _record_reip(c):
             mon = c.setdefault('monitor', {})
             hist = [t for t in mon.get('reip_history', []) if (time.time() - t) < 86400]
-            hist.append(int(time.time()))
+            # Attempt quota was already reserved before the destructive operation.
             mon['reip_history'] = hist
             mon['last_reip_timestamp'] = int(time.time())
             mon['last_reip_old_ip'] = old_ip
             mon['last_reip_new_ip'] = new_ip
             mon['dns_sync_pending'] = not dns_matched
+            mon['healing_operation']['phase'] = 'completed'
             return True
 
         cfg_mgr.update(_record_reip)
@@ -1469,7 +1565,7 @@ async def run_healing_routine(trigger_source='MANUAL', force=False) -> dict:
         if is_success:
             runtime_state['status'] = 'healthy'
             await broadcast_log(f'[OK] Rebirth completed and verified in {dt}s! Server is now operational on IP: {new_ip}')
-            notification.NotificationManager.broadcast(
+            await asyncio.to_thread(notification.NotificationManager.broadcast,
                 cfg,
                 title="IP Swapped & Restored / 节点IP重生命名成功",
                 message=f"[OK] Rebirth routine succeeded and verified!\nProvider: {prov_name}\nNew IP: {new_ip}\nCloudflare DNS: {cf_record} -> {new_ip}\nDuration: {dt}s",
@@ -1483,7 +1579,7 @@ async def run_healing_routine(trigger_source='MANUAL', force=False) -> dict:
                 f"egress IP match: {ip_matched} (actual {actual_ip}), DNS ok: {dns_ok}."
             )
             await broadcast_log(warn_msg, 'WARN')
-            notification.NotificationManager.broadcast(
+            await asyncio.to_thread(notification.NotificationManager.broadcast,
                 cfg,
                 title="IP Swapped with Verification Warning / 节点换IP完成但需复核",
                 message=warn_msg,
@@ -1492,12 +1588,16 @@ async def run_healing_routine(trigger_source='MANUAL', force=False) -> dict:
             return {'ok': False, 'new_ip': new_ip, 'error': warn_msg, 'duration_sec': dt, 'dns_ok': dns_ok}
 
     except Exception as e:
+        def mark_uncertain(current):
+            operation = current.setdefault('monitor', {}).get('healing_operation', {})
+            operation['phase'] = 'uncertain' if operation.get('phase') in ('changing_ip', 'allocated') else 'preflight_failed'
+        await asyncio.to_thread(cfg_mgr.update, mark_uncertain)
         logger.error(f'Healing routine failed: {e}', exc_info=True)
         await broadcast_log(f'[ERROR] Healing failed: {str(e)}', 'ERROR')
         runtime_state['status'] = 'warning'
         dt = round(time.time() - t_start, 1)
 
-        notification.NotificationManager.broadcast(
+        await asyncio.to_thread(notification.NotificationManager.broadcast,
             cfg,
             title="Healing Routine Failed / 自动修复失败",
             message=f"[FAILED] Rebirth routine failed for provider {prov_name}: {str(e)}",
@@ -1507,13 +1607,27 @@ async def run_healing_routine(trigger_source='MANUAL', force=False) -> dict:
     finally:
         runtime_state['heal_in_progress'] = False
 
+@app.post('/api/heal/reconcile')
+def reconcile_healing(request: Request, decision: dict):
+    check_admin(request)
+    if decision.get('acknowledge_manual_verification') is not True:
+        raise HTTPException(status_code=422, detail='Confirm the cloud instance and address attachment were manually verified')
+    def reconcile(cfg):
+        operation = cfg.setdefault('monitor', {}).get('healing_operation', {})
+        if operation.get('phase') not in ('uncertain', 'changing_ip', 'allocated'):
+            raise ValueError('No uncertain operation to reconcile')
+        operation['phase'] = 'manually_reconciled'
+        operation['reconciled_at'] = int(time.time())
+    cfg_mgr.update(reconcile)
+    return {'success': True}
+
 @app.post('/api/heal/trigger')
-async def trigger_healing(request: Request, body: Optional[HealTriggerModel] = None):
+def trigger_healing(request: Request, body: Optional[HealTriggerModel] = None):
     check_admin(request)
     if runtime_state['heal_in_progress']:
         raise HTTPException(status_code=409, detail='Healing is already in progress')
     force = body.force if body else False
-    asyncio.create_task(run_healing_routine('MANUAL', force=force))
+    create_managed_task(run_healing_routine('MANUAL', force=force))
     return {'status': 'initiated', 'message': f'Re-IP rebirth sequence started (force={force})'}
 
 @app.get('/api/ip/audit')
@@ -1533,31 +1647,29 @@ class SpeedtestRequest(BaseModel):
     mode: Optional[str] = 'full'
 
 @app.post('/api/speedtest/run')
-async def trigger_speedtest(request: Request, req: Optional[SpeedtestRequest] = None):
+def trigger_speedtest(request: Request, req: Optional[SpeedtestRequest] = None):
     check_admin(request)
     mode = req.mode if req and req.mode else 'full'
     started = speedtest_mgr.speedtest_mgr.start_benchmark(mode=mode)
     if not started:
         raise HTTPException(status_code=409, detail='已有网络测速任务正在执行中，请稍候')
     mode_name = '全带宽与三网压测' if mode == 'full' else '国内三网低延迟探测'
-    await broadcast_log(f'网络测速任务已发起 ({mode_name})', 'INFO')
+    log_event(f'网络测速任务已发起 ({mode_name})', 'INFO')
     return {'status': 'started', 'message': f'测速任务已启动 ({mode_name})'}
 
 @app.get('/api/speedtest/status')
-async def get_speedtest_status(request: Request):
+def get_speedtest_status(request: Request):
     check_admin(request)
     return speedtest_mgr.speedtest_mgr.get_status()
 
 @app.websocket('/ws/live')
 async def websocket_endpoint(websocket: WebSocket):
-    sec = auth.get_security_config()
-    if sec.get("auth_enabled", True):
-        token = websocket.cookies.get("sentinel_session") or websocket.query_params.get("token")
-        is_session_valid = auth.verify_session_token(token)
-        is_sub_valid = bool(token and hmac.compare_digest(token, sec.get("sub_token", "")))
-        if not (is_session_valid or is_sub_valid):
-            await websocket.close(code=1008)
-            return
+    token = websocket.cookies.get("sentinel_session")
+    origin = websocket.headers.get('origin')
+    from urllib.parse import urlsplit
+    if auth.get_security_config().get('must_change_password', False) or not auth.verify_session_token(token) or (origin and urlsplit(origin).netloc != websocket.headers.get('host')) or len(ws_manager.active_connections) >= 64:
+        await websocket.close(code=1008)
+        return
     await ws_manager.connect(websocket)
     try:
         cfg = cfg_mgr.load()
@@ -1576,28 +1688,31 @@ async def websocket_endpoint(websocket: WebSocket):
             'logs': runtime_state['logs'][-30:]
         })
         while True:
-            data = await websocket.receive_text()
+            data = await asyncio.wait_for(websocket.receive_text(), timeout=90)
+            if len(data) > 64:
+                await websocket.close(code=1009)
+                break
             if data == 'ping':
                 await websocket.send_text('pong')
-    except WebSocketDisconnect:
-        ws_manager.disconnect(websocket)
-    except Exception:
+    except (WebSocketDisconnect, asyncio.TimeoutError):
+        pass
+    finally:
         ws_manager.disconnect(websocket)
 
 # --- Traffic Auditing & Quota Endpoints ---
 
 @app.get('/api/traffic/stats')
-async def get_traffic_stats(request: Request):
+def get_traffic_stats(request: Request):
     check_admin(request)
     return traffic_mgr.TrafficManager.get_traffic_stats()
 
 class TrafficConfigModel(BaseModel):
-    monthly_limit_gb: Optional[float] = None
-    alert_threshold_pct: Optional[int] = None
-    reset_day: Optional[int] = None
+    monthly_limit_gb: Optional[float] = Field(default=None, ge=0, le=10000000)
+    alert_threshold_pct: Optional[int] = Field(default=None, ge=1, le=100)
+    reset_day: Optional[int] = Field(default=None, ge=1, le=28)
 
 @app.post('/api/traffic/config')
-async def set_traffic_config(data: TrafficConfigModel, request: Request):
+def set_traffic_config(data: TrafficConfigModel, request: Request):
     check_admin(request)
     success = traffic_mgr.TrafficManager.set_quota_config(
         monthly_limit_gb=data.monthly_limit_gb,
@@ -1606,7 +1721,7 @@ async def set_traffic_config(data: TrafficConfigModel, request: Request):
     )
     if not success:
         raise HTTPException(status_code=500, detail="Failed to save traffic quota config")
-    await broadcast_log(f'Updated traffic billing quota: limit={data.monthly_limit_gb}GB, threshold={data.alert_threshold_pct}%, reset_day={data.reset_day}')
+    log_event(f'Updated traffic billing quota: limit={data.monthly_limit_gb}GB, threshold={data.alert_threshold_pct}%, reset_day={data.reset_day}')
     return {'status': 'ok', 'config': traffic_mgr.TrafficManager.get_quota_config()}
 
 # --- Sentinel Mesh Cluster Endpoints ---
@@ -1619,18 +1734,25 @@ class MeshNodeModel(BaseModel):
     tag: Optional[str] = 'REMOTE'
     enabled: Optional[bool] = True
 
+    telemetry_token: Optional[str] = ''
+    @field_validator('host')
+    @classmethod
+    def validate_host(cls, value):
+        from validation import https_url
+        return https_url(value if '://' in value else 'https://' + value)
+
 @app.get('/api/mesh/overview')
-async def get_mesh_overview(request: Request):
+def get_mesh_overview(request: Request):
     check_admin(request)
     return mesh_mgr.MeshManager.get_mesh_overview(local_state_func=monitor.get_full_state)
 
 @app.get('/api/mesh/nodes')
-async def get_mesh_nodes(request: Request):
+def get_mesh_nodes(request: Request):
     check_admin(request)
     return mesh_mgr.MeshManager.get_nodes()
 
 @app.post('/api/mesh/nodes')
-async def add_mesh_node(node: MeshNodeModel, request: Request):
+def add_mesh_node(node: MeshNodeModel, request: Request):
     check_admin(request)
     created = mesh_mgr.MeshManager.add_node(
         name=node.name,
@@ -1638,36 +1760,37 @@ async def add_mesh_node(node: MeshNodeModel, request: Request):
         api_token=node.api_token or '',
         location=node.location or 'Global',
         tag=node.tag or 'REMOTE',
-        enabled=node.enabled if node.enabled is not None else True
+        enabled=node.enabled if node.enabled is not None else True,
+        telemetry_token=node.telemetry_token or ''
     )
     def _probe_new():
         stat = mesh_mgr.MeshManager.probe_remote_node(created)
         with mesh_mgr.MeshManager._lock:
             mesh_mgr.MeshManager._node_cache[created['id']] = stat
     threading.Thread(target=_probe_new, daemon=True).start()
-    await broadcast_log(f'Added new Sentinel Mesh node: {node.name} ({node.host})')
+    log_event(f'Added new Sentinel Mesh node: {node.name} ({node.host})')
     return {'status': 'ok', 'node': created}
 
 @app.put('/api/mesh/nodes/{node_id}')
-async def update_mesh_node(node_id: str, node: MeshNodeModel, request: Request):
+def update_mesh_node(node_id: str, node: MeshNodeModel, request: Request):
     check_admin(request)
     updated = mesh_mgr.MeshManager.update_node(node_id, node.dict(exclude_unset=True))
     if not updated:
         raise HTTPException(status_code=404, detail="Node not found")
-    await broadcast_log(f'Updated Sentinel Mesh node: {node_id}')
+    log_event(f'Updated Sentinel Mesh node: {node_id}')
     return {'status': 'ok', 'node': updated}
 
 @app.delete('/api/mesh/nodes/{node_id}')
-async def delete_mesh_node(node_id: str, request: Request):
+def delete_mesh_node(node_id: str, request: Request):
     check_admin(request)
     deleted = mesh_mgr.MeshManager.delete_node(node_id)
     if not deleted:
         raise HTTPException(status_code=404, detail="Node not found")
-    await broadcast_log(f'Removed Sentinel Mesh node ID: {node_id}')
+    log_event(f'Removed Sentinel Mesh node ID: {node_id}')
     return {'status': 'ok', 'deleted_id': node_id}
 
 @app.post('/api/mesh/refresh')
-async def refresh_mesh(request: Request):
+def refresh_mesh(request: Request):
     check_admin(request)
     mesh_mgr.MeshManager.refresh_all_nodes()
     return mesh_mgr.MeshManager.get_mesh_overview(local_state_func=monitor.get_full_state)
@@ -1696,7 +1819,7 @@ def verify_cert_key_access(request: Request) -> bool:
     2. Explicit cert_sync.sync_token Bearer header or token query param.
     Strictly forbids sub_token: subscription clients must never have access to private TLS keys.
     """
-    if auth.is_request_authenticated(request):
+    if auth.is_privileged_request(request):
         return True
 
     cfg = cfg_mgr.load()
@@ -1709,8 +1832,6 @@ def verify_cert_key_access(request: Request) -> bool:
     auth_header = request.headers.get("authorization", "")
     if auth_header.lower().startswith("bearer "):
         req_token = auth_header[7:].strip()
-    elif "token" in request.query_params:
-        req_token = request.query_params.get("token", "").strip()
 
     if not req_token:
         return False
@@ -1722,7 +1843,7 @@ def verify_cert_access(request: Request) -> bool:
     return verify_cert_key_access(request)
 
 @app.get('/api/cert/info')
-async def get_cert_info(request: Request):
+def get_cert_info(request: Request):
     check_admin(request)
     cfg = cfg_mgr.load()
     sync_cfg = cert_sync_mgr.CertSyncManager.get_sync_config(cfg)
@@ -1735,7 +1856,7 @@ async def get_cert_info(request: Request):
     }
 
 @app.get('/api/cert/status')
-async def get_cert_status(request: Request):
+def get_cert_status(request: Request):
     if not verify_cert_access(request):
         raise HTTPException(status_code=401, detail="Invalid certificate sync authorization")
     cfg = cfg_mgr.load()
@@ -1763,7 +1884,9 @@ async def get_cert_status(request: Request):
     }
 
 @app.get('/api/cert/bundle')
-async def get_cert_bundle(request: Request):
+def get_cert_bundle(request: Request, response: Response):
+    response.headers['Cache-Control'] = 'no-store'
+    response.headers['Pragma'] = 'no-cache'
     if not verify_cert_key_access(request):
         raise HTTPException(status_code=401, detail="Invalid certificate sync authorization")
     cfg = cfg_mgr.load()
@@ -1780,11 +1903,11 @@ async def get_cert_bundle(request: Request):
         raise HTTPException(status_code=404, detail=f"Certificate bundle not available: {e}")
 
 @app.post('/api/cert/config')
-async def save_cert_config(model: CertConfigModel, request: Request):
+def save_cert_config(model: CertConfigModel, request: Request):
     check_admin(request)
     data = model.model_dump(exclude_unset=True) if hasattr(model, 'model_dump') else model.dict(exclude_unset=True)
     updated = cert_sync_mgr.CertSyncManager.update_sync_config(data)
-    await broadcast_log(f"Updated certificate sync configuration (role: {updated.get('role')})")
+    log_event(f"Updated certificate sync configuration (role: {updated.get('role')})")
     return {'status': 'ok', 'config': updated}
 
 @app.post('/api/cert/sync-now')
@@ -1795,18 +1918,18 @@ async def trigger_cert_sync_now(model: CertSyncNowModel, request: Request):
     role = sync_cfg.get('role', 'disabled')
 
     if role == 'edge':
-        res = cert_sync_mgr.CertSyncManager.perform_edge_sync(force=bool(model.force))
+        res = await asyncio.to_thread(cert_sync_mgr.CertSyncManager.perform_edge_sync, force=bool(model.force))
         await broadcast_log(f"Edge certificate sync: {res.get('status')} - {res.get('message')}")
         return res
     elif role == 'master':
         # Master node local reload
         services = sync_cfg.get('auto_reload_services', ['x-ui', 'vpsentinel', 'nginx'])
         hook = sync_cfg.get('post_sync_hook', '')
-        reload_results = cert_sync_mgr.CertSyncAgent.reload_downstream_services(services=services, hook_path=hook)
+        reload_results = await asyncio.to_thread(cert_sync_mgr.CertSyncAgent.reload_downstream_services, services=services, hook_path=hook)
         await broadcast_log(f"Master certificate reloaded downstream services: {len(reload_results)} services")
         return {
-            'success': True,
-            'status': 'reloaded',
+            'success': all(item.get('success') for item in reload_results),
+            'status': 'reloaded' if all(item.get('success') for item in reload_results) else 'reload_failed',
             'role': 'master',
             'message': 'Master node reloaded downstream services successfully',
             'reloaded': reload_results
@@ -1821,7 +1944,7 @@ async def trigger_cert_sync_now(model: CertSyncNowModel, request: Request):
 # --- Interactive Bot Endpoints ---
 
 @app.get('/api/bot/status')
-async def get_bot_status(request: Request):
+def get_bot_status(request: Request):
     check_admin(request)
     bot = bot_mgr.get_bot_instance(
         get_state_func=monitor.get_full_state,
@@ -1839,7 +1962,7 @@ if os.path.exists(NUXT_PATH):
     app.mount('/_nuxt', StaticFiles(directory=NUXT_PATH), name='nuxt')
 
 @app.get('/dash')
-async def dash_redirect():
+def dash_redirect():
     dash_index = os.path.join(METACUBEXD_PATH, 'index.html')
     if os.path.exists(dash_index):
         return FileResponse(dash_index)
@@ -1869,13 +1992,13 @@ Commercial support is available at
 </html>"""
 
 @app.api_route('/', methods=['GET', 'HEAD'])
-async def root():
+def root():
     # Public root is a stealth decoy Nginx welcome page
     return HTMLResponse(content=DECOY_HTML, status_code=200, headers={"Server": "nginx/1.22.1"})
 
 @app.api_route('/sentinel', methods=['GET', 'HEAD'])
 @app.api_route('/sentinel/', methods=['GET', 'HEAD'])
-async def serve_sentinel_ui():
+def serve_sentinel_ui():
     index_file = os.path.join(STATIC_PATH, 'index.html')
     if os.path.exists(index_file):
         return FileResponse(index_file)
@@ -1883,7 +2006,7 @@ async def serve_sentinel_ui():
 
 @app.api_route('/{path_slug}', methods=['GET', 'HEAD'])
 @app.api_route('/{path_slug}/', methods=['GET', 'HEAD'])
-async def serve_custom_path_ui(path_slug: str):
+def serve_custom_path_ui(path_slug: str):
     sec = auth.get_security_config()
     configured = sec.get("secret_path", "/sentinel").strip('/')
     if path_slug == configured:

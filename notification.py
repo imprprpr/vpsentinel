@@ -1,3 +1,4 @@
+from net_policy import open_secure, read_limited
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 # ==============================================================================
@@ -29,8 +30,8 @@ class NotificationManager:
         try:
             data = json.dumps(payload).encode('utf-8')
             req = urllib.request.Request(url, data=data, headers={"Content-Type": "application/json"})
-            with urllib.request.urlopen(req, timeout=8) as resp:
-                res = json.loads(resp.read().decode('utf-8'))
+            with open_secure(req, timeout=8) as resp:
+                res = json.loads(read_limited(resp).decode('utf-8'))
                 if res.get("ok"):
                     return True, "Telegram notification sent successfully"
                 return False, res.get("description", "Failed to send")
@@ -54,7 +55,7 @@ class NotificationManager:
         try:
             data = json.dumps(payload).encode('utf-8')
             req = urllib.request.Request(webhook_url, data=data, headers={"Content-Type": "application/json"})
-            with urllib.request.urlopen(req, timeout=8) as resp:
+            with open_secure(req, timeout=8) as resp:
                 return True, "Discord notification sent successfully"
         except Exception as e:
             return False, str(e)
@@ -68,8 +69,8 @@ class NotificationManager:
         url = f"https://api.day.app/{bark_key}/{encoded_title}/{encoded_body}"
         try:
             req = urllib.request.Request(url)
-            with urllib.request.urlopen(req, timeout=8) as resp:
-                res = json.loads(resp.read().decode('utf-8'))
+            with open_secure(req, timeout=8) as resp:
+                res = json.loads(read_limited(resp).decode('utf-8'))
                 if res.get("code") == 200:
                     return True, "Bark notification sent successfully"
                 return False, res.get("message", "Failed to send")
@@ -83,7 +84,7 @@ class NotificationManager:
         try:
             data = json.dumps(payload_dict).encode('utf-8')
             req = urllib.request.Request(webhook_url, data=data, headers={"Content-Type": "application/json"})
-            with urllib.request.urlopen(req, timeout=8) as resp:
+            with open_secure(req, timeout=8) as resp:
                 return True, "Custom webhook triggered successfully"
         except Exception as e:
             return False, str(e)

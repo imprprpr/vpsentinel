@@ -1,29 +1,35 @@
-# -*- coding: utf-8 -*-
-# ==============================================================================
-# Oracle Sentinel - Test Suite Global Sandbox Fixture (R14 Isolation)
-# Ensures test executions never modify the real repository config.json.
-# Strictly zero emojis.
-# ==============================================================================
-
+"""Always isolate tests, including when production path overrides are inherited."""
+import atexit
+import json
 import os
 import shutil
 import tempfile
-import atexit
 
-_repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-_real_cfg = os.path.join(_repo_root, 'config.json')
+_sandbox_dir = tempfile.mkdtemp(prefix='sentinel_test_sandbox_')
+_saved = {}
+for key, value in {
+    'VPSENTINEL_CONFIG_PATH': os.path.join(_sandbox_dir, 'config.json'),
+    'VPSENTINEL_HOME': _sandbox_dir,
+    'VPSENTINEL_TRAFFIC_DB_PATH': os.path.join(_sandbox_dir, 'traffic.db'),
+    'VPSENTINEL_CERT_DIR': os.path.join(_sandbox_dir, 'cert'),
+    'VPSENTINEL_OCI_DIR': os.path.join(_sandbox_dir, 'oci'),
+    'VPSENTINEL_XUI_DB_PATH': os.path.join(_sandbox_dir, 'xui.db'),
+    'VPSENTINEL_STATIC_PATH': os.path.join(os.path.dirname(os.path.dirname(__file__)), 'static'),
+}.items():
+    _saved[key] = os.environ.get(key)
+    os.environ[key] = value
+with open(os.environ['VPSENTINEL_CONFIG_PATH'], 'w') as stream:
+    json.dump({'security': {'admin_password_hash': 'test-only-placeholder',
+                           'session_secret': 'test-only-secret', 'sub_token': 'test-only-sub'}}, stream)
 
-if 'VPSENTINEL_CONFIG_PATH' not in os.environ:
-    _sandbox_dir = tempfile.mkdtemp(prefix='sentinel_test_sandbox_')
-    _sandbox_cfg = os.path.join(_sandbox_dir, 'config.json')
-    if os.path.exists(_real_cfg):
-        shutil.copy2(_real_cfg, _sandbox_cfg)
-    else:
-        with open(_sandbox_cfg, 'w', encoding='utf-8') as f:
-            f.write('{}')
-    os.environ['VPSENTINEL_CONFIG_PATH'] = _sandbox_cfg
 
-    def _cleanup():
-        shutil.rmtree(_sandbox_dir, ignore_errors=True)
+def _cleanup():
+    for key, value in _saved.items():
+        if value is None:
+            os.environ.pop(key, None)
+        else:
+            os.environ[key] = value
+    shutil.rmtree(_sandbox_dir, ignore_errors=True)
 
-    atexit.register(_cleanup)
+
+atexit.register(_cleanup)

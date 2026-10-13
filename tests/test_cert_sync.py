@@ -149,7 +149,7 @@ class TestCertSyncAgent(unittest.TestCase):
         st = os.stat(privkey)
         self.assertEqual(oct(st.st_mode)[-3:], '600')
 
-    @patch('urllib.request.urlopen')
+    @patch('cert_sync_mgr.open_secure')
     def test_check_master_status(self, mock_urlopen):
         mock_resp = MagicMock()
         mock_resp.read.return_value = json.dumps({
@@ -171,7 +171,7 @@ class TestCertSyncAgent(unittest.TestCase):
         self.assertEqual(status['fingerprint'], 'abc1234567890abcdef')
         self.assertIn('master.example.com', status['domains'])
 
-    @patch('urllib.request.urlopen')
+    @patch('cert_sync_mgr.open_secure')
     def test_pull_cert_bundle(self, mock_urlopen):
         cert_pem, key_pem = generate_test_cert_and_key()
         mock_resp = MagicMock()

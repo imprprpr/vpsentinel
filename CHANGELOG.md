@@ -1,3 +1,15 @@
+## 2026-10-13 — Security and reliability remediation
+
+- Separate admin, subscription, Mesh telemetry, and certificate synchronization privileges; revoke sessions on logout and require initial password changes.
+- Escape dynamic UI data and sanitize HTML, preserving actions through inert data attributes.
+- Require verified HTTPS, bounded responses, redirect refusal, and explicit private-host authorization.
+- Create sensitive files privately, serialize configuration changes across processes, validate certificate bundles and commit complete generations.
+- Protect IP rotation with durable operation phases, compensation checks, an external-controller gate, DNS-only retries and inbound evidence for automatic destructive recovery.
+- Introduce configurable node sources and runtime paths; preserve partial settings and report unsupported service backends accurately.
+- Run the web service as an unprivileged account and isolate approved service/provisioning operations in a root broker.
+- Lock dependency versions and hashes; require verified artifacts, expand security regressions and CI.
+- Migration and verification details: `docs/SECURITY-REMEDIATION-2026-10-13.md`.
+
 # Changelog
 
 All notable changes to the **Oracle Sentinel** project will be documented in this file.

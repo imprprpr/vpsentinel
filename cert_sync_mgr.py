@@ -1,3 +1,5 @@
+from net_policy import open_secure, read_limited
+from secure_files import transactional, atomic_write
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 # ==============================================================================
@@ -23,10 +25,8 @@ from service_mgr import get_service_manager
 logger = logging.getLogger('CertSync')
 
 # Default certificate paths
-DEFAULT_CERT_DIRS = [
-    '/etc/vpsentinel/cert',
-    '/etc/oracle-sentinel/cert'
-]
+from paths import CERT_DIR
+DEFAULT_CERT_DIRS = [CERT_DIR]
 
 def resolve_cert_dir(custom_dir: Optional[str] = None) -> str:
     """Resolves existing or target certificate directory."""
@@ -220,6 +220,10 @@ class CertManager:
     @classmethod
     def read_cert_bundle(cls, cert_dir: Optional[str] = None) -> Dict[str, Any]:
         """Reads fullchain.pem and privkey.pem to package as a bundle."""
+        cert_dir = resolve_cert_dir(cert_dir)
+        current = os.path.join(cert_dir, '.current')
+        if os.path.islink(current):
+            cert_dir = os.path.realpath(current)
         target_dir = resolve_cert_dir(custom_dir=cert_dir)
         fullchain_path = os.path.join(target_dir, 'fullchain.pem')
         privkey_path = os.path.join(target_dir, 'privkey.pem')
@@ -253,8 +257,8 @@ class CertSyncAgent:
     def _create_ssl_context(verify_ssl: bool = True) -> ssl.SSLContext:
         ctx = ssl.create_default_context()
         if not verify_ssl:
-            ctx.check_hostname = False
-            ctx.verify_mode = ssl.CERT_NONE
+            ctx.check_hostname = True
+            ctx.verify_mode = ssl.CERT_REQUIRED
         return ctx
 
     @classmethod
@@ -277,9 +281,9 @@ class CertSyncAgent:
         req = urllib.request.Request(url, headers=headers)
         t0 = time.time()
         try:
-            with urllib.request.urlopen(req, timeout=timeout, context=ctx) as resp:
+            with open_secure(req, timeout=timeout, context=ctx) as resp:
                 rtt = round((time.time() - t0) * 1000, 1)
-                data = json.loads(resp.read().decode('utf-8'))
+                data = json.loads(read_limited(resp).decode('utf-8'))
                 data['rtt_ms'] = rtt
                 return data
         except urllib.error.HTTPError as he:
@@ -306,8 +310,8 @@ class CertSyncAgent:
         ctx = cls._create_ssl_context(verify_ssl)
         req = urllib.request.Request(url, headers=headers)
         try:
-            with urllib.request.urlopen(req, timeout=timeout, context=ctx) as resp:
-                data = json.loads(resp.read().decode('utf-8'))
+            with open_secure(req, timeout=timeout, context=ctx) as resp:
+                data = json.loads(read_limited(resp).decode('utf-8'))
                 return data
         except urllib.error.HTTPError as he:
             raise RuntimeError(f"Master bundle request failed with HTTP {he.code}")
@@ -315,6 +319,7 @@ class CertSyncAgent:
             raise RuntimeError(f"Failed to connect to master: {e}")
 
     @classmethod
+    @transactional
     def save_cert_bundle_atomic(
         cls,
         cert_pem: str,
@@ -325,37 +330,54 @@ class CertSyncAgent:
         Atomically saves fullchain.pem and privkey.pem to target_dir.
         Ensures strict permissions (dir: 0755, privkey: 0600, fullchain: 0644).
         """
-        os.makedirs(target_dir, mode=0o755, exist_ok=True)
+        from cryptography import x509
+        from cryptography.hazmat.primitives import serialization
+        from datetime import datetime, timezone
+        import uuid
+        cert = x509.load_pem_x509_certificate(cert_pem.encode())
+        key = serialization.load_pem_private_key(key_pem.encode(), password=None)
+        public = lambda obj: obj.public_key().public_bytes(serialization.Encoding.DER, serialization.PublicFormat.SubjectPublicKeyInfo)
+        if public(cert) != public(key):
+            raise ValueError('Certificate and private key do not match')
+        now = datetime.now(timezone.utc)
+        if not cert.not_valid_before_utc <= now < cert.not_valid_after_utc:
+            raise ValueError('Certificate is expired or not yet valid')
+        os.makedirs(target_dir, mode=0o700, exist_ok=True)
+        generation = '.bundle-' + uuid.uuid4().hex
+        version = os.path.join(target_dir, generation)
+        os.mkdir(version, 0o700)
+        atomic_write(os.path.join(version, 'privkey.pem'), key_pem)
+        atomic_write(os.path.join(version, 'fullchain.pem'), cert_pem, 0o644)
+        current = os.path.join(target_dir, '.current')
+        # Migrate existing files to a complete generation before exposing stable links.
+        if not os.path.islink(current):
+            legacy = os.path.join(target_dir, '.bundle-legacy-' + uuid.uuid4().hex)
+            os.mkdir(legacy, 0o700)
+            for name in ('fullchain.pem', 'privkey.pem'):
+                old = os.path.join(target_dir, name)
+                if os.path.isfile(old):
+                    with open(old, 'rb') as stream:
+                        atomic_write(os.path.join(legacy, name), stream.read(), 0o600 if name == 'privkey.pem' else 0o644)
+                else:
+                    with open(os.path.join(version, name), 'rb') as stream:
+                        atomic_write(os.path.join(legacy, name), stream.read(), 0o600 if name == 'privkey.pem' else 0o644)
+            os.symlink(os.path.basename(legacy), current)
+        for name in ('fullchain.pem', 'privkey.pem'):
+            path = os.path.join(target_dir, name)
+            desired = '.current/' + name
+            if not os.path.islink(path) or os.readlink(path) != desired:
+                tmp = path + '.link-' + uuid.uuid4().hex
+                os.symlink(desired, tmp)
+                os.replace(tmp, path)
+        temp_link = current + '.new-' + uuid.uuid4().hex
+        os.symlink(generation, temp_link)
+        os.replace(temp_link, current)
+        directory_fd = os.open(target_dir, os.O_RDONLY | os.O_DIRECTORY)
         try:
-            os.chmod(target_dir, 0o755)
-        except Exception:
-            pass
-
-        fullchain_path = os.path.join(target_dir, 'fullchain.pem')
-        privkey_path = os.path.join(target_dir, 'privkey.pem')
-
-        # Atomic write for private key
-        tmp_key = os.path.join(target_dir, f".privkey.{int(time.time()*1000)}.tmp")
-        with open(tmp_key, 'w', encoding='utf-8') as f:
-            f.write(key_pem)
-        try:
-            os.chmod(tmp_key, 0o600)
-        except Exception:
-            pass
-        os.replace(tmp_key, privkey_path)
-
-        # Atomic write for certificate chain
-        tmp_cert = os.path.join(target_dir, f".fullchain.{int(time.time()*1000)}.tmp")
-        with open(tmp_cert, 'w', encoding='utf-8') as f:
-            f.write(cert_pem)
-        try:
-            os.chmod(tmp_cert, 0o644)
-        except Exception:
-            pass
-        os.replace(tmp_cert, fullchain_path)
-
-        logger.info(f"Successfully saved certificate bundle to {target_dir}")
-        return fullchain_path, privkey_path
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+        return os.path.join(target_dir, 'fullchain.pem'), os.path.join(target_dir, 'privkey.pem')
 
     @classmethod
     def reload_downstream_services(
@@ -378,36 +400,14 @@ class CertSyncAgent:
                 continue
 
             # 3x-ui / Xray reload
-            if svc_name in ('x-ui', '3x-ui', 'xray'):
+            if svc_name in ('x-ui', '3x-ui', 'xray', 'nginx', 'caddy'):
                 mgr = get_service_manager()
-                ok, detail = mgr.reload('x-ui')
+                ok, detail = mgr.reload('x-ui' if svc_name == '3x-ui' else svc_name)
                 results.append({
                     'service': svc_name,
                     'action': 'reload',
                     'success': ok,
                     'detail': detail or ('x-ui reloaded' if ok else 'Exit non-zero')
-                })
-
-            # Nginx reload
-            elif svc_name == 'nginx':
-                cmd = "nginx -t 2>/dev/null && nginx -s reload 2>/dev/null"
-                res = subprocess.run(cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-                results.append({
-                    'service': 'nginx',
-                    'action': 'reload',
-                    'success': res.returncode == 0,
-                    'detail': 'nginx reloaded' if res.returncode == 0 else res.stderr.strip() or 'Nginx reload failed or inactive'
-                })
-
-            # Caddy reload
-            elif svc_name == 'caddy':
-                cmd = "caddy reload 2>/dev/null"
-                res = subprocess.run(cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-                results.append({
-                    'service': 'caddy',
-                    'action': 'reload',
-                    'success': res.returncode == 0,
-                    'detail': 'caddy reloaded' if res.returncode == 0 else res.stderr.strip() or 'Caddy reload failed or inactive'
                 })
 
             # VPSentinel Dashboard service (Uvicorn)
@@ -421,8 +421,9 @@ class CertSyncAgent:
                 results.append({
                     'service': 'vpsentinel',
                     'action': 'restart_scheduled',
-                    'success': True,
-                    'detail': 'Scheduled restart in 1s'
+                    'success': None,
+                    'pending': True,
+                    'detail': 'Restart queued; completion must be confirmed after reconnect'
                 })
 
         # Post-sync hook script
@@ -448,11 +449,20 @@ class CertSyncAgent:
         return results
 
 
+def serialized_sync(fn):
+    import functools
+    @functools.wraps(fn)
+    def wrapped(cls, *args, **kwargs):
+        with cls._operation_lock:
+            return fn(cls, *args, **kwargs)
+    return wrapped
+
 class CertSyncManager:
     """High-level controller coordinating role checks, polling, and API interactions."""
 
     _lock = threading.RLock()
     _poller_thread = None
+    _operation_lock = threading.RLock()
 
     @classmethod
     def get_sync_config(cls, cfg: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
@@ -471,7 +481,8 @@ class CertSyncManager:
             'poll_interval_hours': int(sync_cfg.get('poll_interval_hours', 12)),
             'auto_reload_services': sync_cfg.get('auto_reload_services', ['x-ui', 'vpsentinel', 'nginx']),
             'post_sync_hook': sync_cfg.get('post_sync_hook', '').strip(),
-            'verify_ssl': bool(sync_cfg.get('verify_ssl', True)),
+            'verify_ssl': True,
+            'expected_domains': sync_cfg.get('expected_domains', []),
             'last_sync_time': int(sync_cfg.get('last_sync_time', 0)),
             'last_fingerprint': sync_cfg.get('last_fingerprint', ''),
             'last_sync_status': sync_cfg.get('last_sync_status', 'never'),
@@ -479,6 +490,7 @@ class CertSyncManager:
         }
 
     @classmethod
+    @transactional
     def update_sync_config(cls, new_settings: Dict[str, Any]) -> Dict[str, Any]:
         """Updates cert_sync configuration block in config.json."""
         from sentinel_core import ConfigManager
@@ -489,7 +501,7 @@ class CertSyncManager:
 
             for k in [
                 'enabled', 'role', 'master_url', 'sync_token', 'cert_dir',
-                'poll_interval_hours', 'auto_reload_services', 'post_sync_hook',
+                'poll_interval_hours', 'auto_reload_services', 'post_sync_hook', 'expected_domains',
                 'verify_ssl', 'last_sync_time', 'last_fingerprint',
                 'last_sync_status', 'last_sync_message'
             ]:
@@ -500,6 +512,7 @@ class CertSyncManager:
             return cls.get_sync_config(cfg)
 
     @classmethod
+    @serialized_sync
     def perform_edge_sync(cls, force: bool = False) -> Dict[str, Any]:
         """
         Executes an edge sync cycle:
@@ -563,6 +576,18 @@ class CertSyncManager:
             if not cert_pem or not key_pem:
                 raise ValueError("Master returned empty certificate or private key.")
 
+            actual_fp = CertManager.calculate_fingerprint(cert_pem.encode())
+            if not downloaded_fp or downloaded_fp != actual_fp or (master_fp and master_fp != actual_fp):
+                raise ValueError('Certificate fingerprint does not match the authenticated master')
+            from cryptography import x509
+            parsed = x509.load_pem_x509_certificate(cert_pem.encode())
+            sans = parsed.extensions.get_extension_for_class(x509.SubjectAlternativeName).value.get_values_for_type(x509.DNSName)
+            expected = sync_cfg.get('expected_domains', []) or cfg.get('cert_sync', {}).get('expected_domains', [])
+            for domain in expected:
+                if domain not in sans and not any(name.startswith('*.') and domain.count('.') == name.count('.') and domain.endswith(name[1:]) for name in sans):
+                    raise ValueError('Certificate SAN does not cover ' + domain)
+            current = os.path.join(cert_dir, '.current')
+            previous = os.readlink(current) if os.path.islink(current) else None
             # Step 4: Atomic save
             CertSyncAgent.save_cert_bundle_atomic(cert_pem, key_pem, cert_dir)
 
@@ -571,12 +596,23 @@ class CertSyncManager:
             hook = sync_cfg.get('post_sync_hook', '')
             reload_results = CertSyncAgent.reload_downstream_services(services=services, hook_path=hook)
 
+            failed = [item for item in reload_results if not item.get('success') and not item.get('pending')]
+            if failed:
+                if previous:
+                    rollback = current + '.rollback'
+                    if os.path.lexists(rollback): os.unlink(rollback)
+                    os.symlink(previous, rollback)
+                    os.replace(rollback, current)
+                    CertSyncAgent.reload_downstream_services(services=[x for x in services if x not in ('vpsentinel', 'oracle-sentinel')])
+                raise RuntimeError('Downstream reload failed: ' + str(failed))
+            pending = any(item.get('pending') for item in reload_results)
+            status = 'reload_pending' if pending else 'success'
             msg = f"Successfully synchronized certificate (Fingerprint: {downloaded_fp[:16]}...)"
-            cls._update_sync_status(status='success', message=msg, fingerprint=downloaded_fp)
+            cls._update_sync_status(status=status, message=msg, fingerprint=downloaded_fp)
 
             return {
-                'success': True,
-                'status': 'success',
+                'success': not pending,
+                'status': status,
                 'fingerprint': downloaded_fp,
                 'domains': bundle.get('domains', []),
                 'valid_to': bundle.get('valid_to', ''),
@@ -592,6 +628,7 @@ class CertSyncManager:
             return {'success': False, 'status': 'failed', 'message': err_msg}
 
     @classmethod
+    @transactional
     def _update_sync_status(
         cls,
         status: str,
@@ -614,9 +651,14 @@ class CertSyncManager:
     @classmethod
     def start_background_poller(cls, get_config_func=None, interval_hours: Optional[int] = None):
         """Starts background daemon to periodically check & sync certificate."""
+        existing = getattr(cls, '_poller_thread', None)
+        if existing is not None and existing.is_alive():
+            return existing
+        stop_event = threading.Event()
+        cls._stop_event = stop_event
         def _loop():
             logger.info("Starting Distributed Certificate Sync background poller...")
-            while True:
+            while not stop_event.is_set():
                 try:
                     cfg = get_config_func() if callable(get_config_func) else cls.get_sync_config()
                     sync_cfg = cls.get_sync_config(cfg)
@@ -635,7 +677,7 @@ class CertSyncManager:
                 except Exception as e:
                     logger.error(f"Error in CertSync background loop: {e}")
 
-                time.sleep(300) # Check criteria every 5 minutes
+                stop_event.wait(300) # Check criteria every 5 minutes
 
         with cls._lock:
             if cls._poller_thread is None or not cls._poller_thread.is_alive():

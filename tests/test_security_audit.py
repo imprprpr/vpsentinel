@@ -255,7 +255,7 @@ class TestSecurityAudit(unittest.TestCase):
         # 1. PBKDF2 hash generation
         pwd = "MySecretPass_2026!"
         h = app.auth.hash_password(pwd)
-        self.assertTrue(h.startswith("pbkdf2_sha256$100000$"))
+        self.assertTrue(h.startswith("pbkdf2_sha256$600000$"))
         self.assertTrue(app.auth.verify_password(pwd, h))
         self.assertFalse(app.auth.verify_password("WrongPass", h))
 
@@ -275,7 +275,7 @@ class TestSecurityAudit(unittest.TestCase):
         self.assertTrue(ok)
         new_cfg = sentinel_core.ConfigManager.load()
         upgraded_hash = new_cfg.get("security", {}).get("admin_password_hash", "")
-        self.assertTrue(upgraded_hash.startswith("pbkdf2_sha256$100000$"))
+        self.assertTrue(upgraded_hash.startswith("pbkdf2_sha256$600000$"))
         self.assertTrue(app.auth.verify_password(pwd, upgraded_hash))
 
     def test_brute_force_lockout(self):

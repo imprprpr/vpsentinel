@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 import os
+from secure_files import transactional
 import json
 import base64
 import sqlite3
@@ -13,7 +14,8 @@ from sentinel_core import ConfigManager
 from clean_ip_mgr import CleanIPManager
 
 logger = logging.getLogger('SubEngine')
-DB_PATH = '/etc/x-ui/x-ui.db'
+from paths import XUI_DB_PATH
+DB_PATH = XUI_DB_PATH
 
 DEFAULT_RULES_CONFIG = {
     'adblock': True,
@@ -44,6 +46,7 @@ class SubEngine:
         return {**DEFAULT_RULES_CONFIG, **rules}
 
     @staticmethod
+    @transactional
     def save_rules_config(rules):
         cfg = ConfigManager.load()
         cfg['rules_config'] = rules
@@ -72,7 +75,7 @@ class SubEngine:
     def get_server_domain():
         try:
             cfg = ConfigManager.load()
-            rec = cfg.get('cloudflare', {}).get('record_name')
+            rec = cfg.get('dns', {}).get('record_name') or cfg.get('cloudflare', {}).get('record_name')
             if rec:
                 return rec
         except Exception:
@@ -81,6 +84,11 @@ class SubEngine:
 
     @staticmethod
     def extract_nodes_from_db():
+        from node_sources import collect_native_nodes
+        return collect_native_nodes(SubEngine._extract_sqlite_nodes, DB_PATH)
+
+    @staticmethod
+    def _extract_sqlite_nodes():
         if not os.path.exists(DB_PATH):
             logger.error(f'Database {DB_PATH} not found.')
             return []
@@ -119,69 +127,72 @@ class SubEngine:
                 continue
 
             clients = st.get('clients', [])
-            client = clients[0] if clients else {}
+            for client in (clients or [{}]):
+                if client.get('enable') is False:
+                    continue
 
-            label = str(remark).strip() or str(tag).strip()
 
-            if proto == 'vless' and ss.get('security') == 'reality':
-                rs = ss.get('realitySettings', {})
-                rs_st = rs.get('settings', {})
-                proto_label = label or 'Oracle-Reality'
-                node_name = _unique(f"[US] {proto_label}", used_clash_names)
-                node_tag = _unique(proto_label, used_singbox_tags)
-                node = {
-                    'name': node_name,
-                    'tag': node_tag,
-                    'type': 'vless',
-                    'server': server_ip,
-                    'port': port,
-                    'uuid': client.get('id', ''),
-                    'network': ss.get('network', 'tcp'),
-                    'tls': True,
-                    'udp': True,
-                    'flow': client.get('flow', 'xtls-rprx-vision'),
-                    'servername': rs.get('serverNames', ['swdist.apple.com'])[0] if rs.get('serverNames') else 'swdist.apple.com',
-                    'reality-opts': {
-                        'public-key': rs_st.get('publicKey', ''),
-                        'short-id': rs.get('shortIds', ['cb2ebc41'])[0] if rs.get('shortIds') else ''
-                    },
-                    'client-fingerprint': rs_st.get('fingerprint', 'chrome')
-                }
-                nodes.append(('reality', node))
+                label = str(remark).strip() or str(tag).strip()
 
-            elif proto == 'hysteria':
-                proto_label = label or 'Oracle-Hy2'
-                node_name = _unique(f"[US] {proto_label}", used_clash_names)
-                node_tag = _unique(proto_label, used_singbox_tags)
-                node = {
-                    'name': node_name,
-                    'tag': node_tag,
-                    'type': 'hysteria2',
-                    'server': server_ip,
-                    'port': port,
-                    'password': client.get('auth', ''),
-                    'sni': ss.get('tlsSettings', {}).get('serverName', domain),
-                    'skip-cert-verify': True
-                }
-                nodes.append(('hy2', node))
+                if proto == 'vless' and ss.get('security') == 'reality':
+                    rs = ss.get('realitySettings', {})
+                    rs_st = rs.get('settings', {})
+                    proto_label = label or 'VPS-Reality'
+                    node_name = _unique(f"[VPS] {proto_label}", used_clash_names)
+                    node_tag = _unique(proto_label, used_singbox_tags)
+                    node = {
+                        'name': node_name,
+                        'tag': node_tag,
+                        'type': 'vless',
+                        'server': server_ip,
+                        'port': port,
+                        'uuid': client.get('id', ''),
+                        'network': ss.get('network', 'tcp'),
+                        'tls': True,
+                        'udp': True,
+                        'flow': client.get('flow', 'xtls-rprx-vision'),
+                        'servername': rs.get('serverNames', ['swdist.apple.com'])[0] if rs.get('serverNames') else 'swdist.apple.com',
+                        'reality-opts': {
+                            'public-key': rs_st.get('publicKey', ''),
+                            'short-id': rs.get('shortIds', ['cb2ebc41'])[0] if rs.get('shortIds') else ''
+                        },
+                        'client-fingerprint': rs_st.get('fingerprint', 'chrome')
+                    }
+                    nodes.append(('reality', node))
 
-            elif proto == 'trojan':
-                proto_label = label or 'Oracle-Trojan'
-                node_name = _unique(f"[US] {proto_label}", used_clash_names)
-                node_tag = _unique(proto_label, used_singbox_tags)
-                node = {
-                    'name': node_name,
-                    'tag': node_tag,
-                    'type': 'trojan',
-                    'server': server_ip,
-                    'port': port,
-                    'password': client.get('password', ''),
-                    'sni': ss.get('tlsSettings', {}).get('serverName', domain),
-                    'skip-cert-verify': True,
-                    'client-fingerprint': 'chrome',
-                    'udp': True
-                }
-                nodes.append(('trojan', node))
+                elif proto == 'hysteria':
+                    proto_label = label or 'VPS-Hy2'
+                    node_name = _unique(f"[VPS] {proto_label}", used_clash_names)
+                    node_tag = _unique(proto_label, used_singbox_tags)
+                    node = {
+                        'name': node_name,
+                        'tag': node_tag,
+                        'type': 'hysteria2',
+                        'server': server_ip,
+                        'port': port,
+                        'password': client.get('auth', ''),
+                        'sni': ss.get('tlsSettings', {}).get('serverName', domain),
+                        'skip-cert-verify': False
+                    }
+                    nodes.append(('hy2', node))
+
+                elif proto == 'trojan':
+                    proto_label = label or 'VPS-Trojan'
+                    node_name = _unique(f"[VPS] {proto_label}", used_clash_names)
+                    node_tag = _unique(proto_label, used_singbox_tags)
+                    node = {
+                        'name': node_name,
+                        'tag': node_tag,
+                        'type': 'trojan',
+                        'server': server_ip,
+                        'port': port,
+                        'password': client.get('password', ''),
+                        'sni': ss.get('tlsSettings', {}).get('serverName', domain),
+                        'skip-cert-verify': False,
+                        'client-fingerprint': 'chrome',
+                        'udp': True
+                    }
+                    nodes.append(('trojan', node))
 
         return nodes
 
@@ -320,7 +331,7 @@ class SubEngine:
             n = node_data.copy()
             if ntype == 'hy2' and rules_cfg.get('hy2_hop', False):
                 n['ports'] = '20000-40000'
-                n['name'] = 'Oracle-US-Hy2 (Hop)'
+                n['name'] = 'VPS-Hy2 (Hop)'
             native_proxies.append(n)
             native_names.append(n['name'])
 
@@ -703,7 +714,7 @@ class SubEngine:
         # 1. Direct Nodes
         for ntype, n in raw_nodes:
             if ntype == 'reality':
-                name = urllib.parse.quote('Oracle-US (Reality)')
+                name = urllib.parse.quote('VPS (Reality)')
                 pbk = n['reality-opts']['public-key']
                 sid = n['reality-opts']['short-id']
                 sni = n['servername']
@@ -714,13 +725,13 @@ class SubEngine:
 
             elif ntype == 'hy2':
                 hop = rules_cfg.get('hy2_hop', False)
-                name = urllib.parse.quote('Oracle-Hy2 (端口跳跃)' if hop else 'Oracle-Hy2')
+                name = urllib.parse.quote('VPS-Hy2 (端口跳跃)' if hop else 'VPS-Hy2')
                 mport_param = "&mport=20000-40000" if hop else ""
                 link = f"hysteria2://{n['password']}@{n['server']}:{n['port']}?sni={n['sni']}&insecure=0{mport_param}#{name}"
                 links.append(link)
 
             elif ntype == 'trojan':
-                name = urllib.parse.quote('Oracle-Trojan (TLS)')
+                name = urllib.parse.quote('VPS-Trojan (TLS)')
                 link = f"trojan://{n['password']}@{n['server']}:{n['port']}?security=tls&sni={n['sni']}&type=tcp#{name}"
                 links.append(link)
 

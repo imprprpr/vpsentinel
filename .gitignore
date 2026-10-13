@@ -58,3 +58,8 @@ Thumbs.db
 .vscode/
 *.swp
 *~
+
+# Frontend regression tooling
+node_modules/
+*.initial-password
+*.json.lock

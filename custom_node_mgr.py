@@ -1,3 +1,4 @@
+from secure_files import transactional
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 import os
@@ -17,6 +18,7 @@ class CustomNodeManager:
         return cfg.get('custom_nodes', [])
 
     @staticmethod
+    @transactional
     def save_custom_nodes(nodes_list):
         cfg = ConfigManager.load()
         cfg['custom_nodes'] = nodes_list
@@ -149,6 +151,7 @@ class CustomNodeManager:
             raise ValueError(f"Unsupported protocol scheme: {scheme}")
 
     @staticmethod
+    @transactional
     def add_custom_node(node_input):
         """Accepts either a share link string or a dict."""
         if isinstance(node_input, str):
@@ -163,6 +166,17 @@ class CustomNodeManager:
         else:
             raise ValueError("Invalid node input type")
 
+        from validation import host, port
+        node_data['server'] = host(node_data.get('server', ''))
+        node_data['port'] = port(node_data.get('port', 443))
+        if node_data.get('type') not in ('vless', 'hysteria2', 'trojan', 'ss', 'vmess'):
+            raise ValueError('Unsupported node protocol')
+        if node_data.get('type') in ('vless', 'vmess'):
+            import uuid
+            try: uuid.UUID(node_data.get('uuid', ''))
+            except (ValueError, AttributeError): raise ValueError('Invalid node UUID')
+        if len(str(node_data.get('name', ''))) > 256:
+            raise ValueError('Node name exceeds 256 characters')
         if 'port' in node_data:
             try:
                 p_val = int(node_data['port'])
@@ -184,6 +198,7 @@ class CustomNodeManager:
         return node_data
 
     @staticmethod
+    @transactional
     def delete_custom_node(node_id):
         nodes = CustomNodeManager.get_custom_nodes()
         filtered = [n for n in nodes if n.get('id') != node_id]
@@ -191,6 +206,7 @@ class CustomNodeManager:
         return True
 
     @staticmethod
+    @transactional
     def toggle_custom_node(node_id, enabled):
         nodes = CustomNodeManager.get_custom_nodes()
         for n in nodes:

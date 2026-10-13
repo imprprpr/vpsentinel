@@ -4,7 +4,8 @@
 # Optimized for 64MB RAM Podman/LXC Containers & Standalone VPS
 # ==============================================================================
 
-set -euo pipefail
+set -e
+umask 077uo pipefail
 
 echo "===================================================================="
 echo "    Deploying Ultra-Lightweight Japan Native Node (sing-box)        "
@@ -61,7 +62,8 @@ else
 
     echo ">>> Downloading sing-box v${SB_VER} (${SB_ARCH}) safely..."
     mkdir -p /etc/sing-box /usr/local/bin /var/tmp
-    curl --limit-rate 5M -fsSL "https://github.com/SagerNet/sing-box/releases/download/v${SB_VER}/sing-box-${SB_VER}-${SB_ARCH}.tar.gz" -o /var/tmp/sb.tar.gz
+    source "$(dirname "$0")/verified-download.sh"
+    verified_download "https://github.com/SagerNet/sing-box/releases/download/v${SB_VER}/sing-box-${SB_VER}-${SB_ARCH}.tar.gz" "${SINGBOX_SHA256:?Set the release artifact SHA-256}" /var/tmp/sb.tar.gz
     echo ">>> Extracting binary..."
     tar -zxf /var/tmp/sb.tar.gz -C /var/tmp "sing-box-${SB_VER}-${SB_ARCH}/sing-box"
     mv "/var/tmp/sing-box-${SB_VER}-${SB_ARCH}/sing-box" /usr/local/bin/sing-box
@@ -169,7 +171,7 @@ else
     fi
 fi
 
-EXT_IP="${3:-$(curl -s4 https://api.ipify.org 2>/dev/null || curl -s4 https://ifconfig.me 2>/dev/null || echo '85.113.70.183')}"
+EXT_IP="${3:-$(curl -s4 https://api.ipify.org 2>/dev/null || curl -s4 https://ifconfig.me 2>/dev/null || echo '')}"
 NODE_NAME="${4:-[JP] 绿云-IIJ (原生超低延迟)}"
 NAME_ENCODED=$(echo -n "$NODE_NAME" | od -An -tx1 | tr ' ' '%' | tr -d '\n')
 

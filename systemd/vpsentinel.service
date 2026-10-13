@@ -1,12 +1,16 @@
 [Unit]
 Description=VPSentinel - Universal Cloud VPS Self-Healing & Subscription Control Center
-After=network.target x-ui.service
-Alias=oracle-sentinel.service
+After=network.target x-ui.service vpsentinel-control.service
+Wants=vpsentinel-control.service
 
 [Service]
 Type=simple
-User=root
+UMask=0077
+User=vpsentinel
+Group=vpsentinel
 WorkingDirectory=/opt/vpsentinel
+Environment=VPSENTINEL_HOME=/var/lib/vpsentinel
+Environment=VPSENTINEL_CERT_DIR=/etc/vpsentinel/cert
 EnvironmentFile=-/etc/default/vpsentinel
 ExecStart=/opt/vpsentinel/venv/bin/python3 -m uvicorn app:app --host 0.0.0.0 --port 20540 --ssl-keyfile /etc/vpsentinel/cert/privkey.pem --ssl-certfile /etc/vpsentinel/cert/fullchain.pem
 Restart=always
@@ -14,10 +18,15 @@ RestartSec=5
 LimitNOFILE=65535
 NoNewPrivileges=yes
 PrivateTmp=yes
-ProtectSystem=full
-ProtectHome=read-only
-CapabilityBoundingSet=CAP_NET_BIND_SERVICE CAP_NET_ADMIN CAP_NET_RAW
-AmbientCapabilities=CAP_NET_BIND_SERVICE
+ProtectSystem=strict
+ReadWritePaths=/var/lib/vpsentinel /etc/vpsentinel/cert
+StateDirectory=vpsentinel
+StateDirectoryMode=0700
+ProtectHome=yes
+CapabilityBoundingSet=
+RestrictSUIDSGID=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
 
 [Install]
 WantedBy=multi-user.target
+Alias=oracle-sentinel.service

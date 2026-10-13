@@ -65,10 +65,15 @@ fi
 mkdir -p /opt/realm
 cd /opt/realm
 
-echo ">>> Downloading latest Realm binary ($REALM_ARCH)..."
-REALM_URL="https://github.com/zhboner/realm/releases/latest/download/realm-${REALM_ARCH}.tar.gz"
-curl -fsSL "$REALM_URL" -o /tmp/realm.tar.gz
-tar -zxvf /tmp/realm.tar.gz -C /opt/realm/
+source "$(dirname "$0")/verified-download.sh"
+REALM_URL="${REALM_URL:?Set the pinned Realm release URL}"
+REALM_SHA256="${REALM_SHA256:?Set its independently verified SHA-256}"
+TMP_REALM=$(mktemp -d)
+trap 'rm -rf "$TMP_REALM"' EXIT
+verified_download "$REALM_URL" "$REALM_SHA256" "$TMP_REALM/realm.tar.gz"
+# Extract only the expected binary; no archive paths can overwrite other files.
+tar -xOf "$TMP_REALM/realm.tar.gz" realm > "$TMP_REALM/realm"
+install -m 0755 "$TMP_REALM/realm" /opt/realm/realm
 chmod +x /opt/realm/realm
 rm -f /tmp/realm.tar.gz
 

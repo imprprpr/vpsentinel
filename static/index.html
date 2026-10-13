@@ -1,10 +1,11 @@
 <!DOCTYPE html>
 <html lang="zh-CN" class="dark">
 <head>
+  <script src="/static/vendor/purify.min.js"></script>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Oracle Sentinel 控制中枢</title>
-  <script src="./tailwindcss.min.js"></script>
+  <title>VPSentinel 控制中枢</title>
+  <script src="/static/tailwindcss.min.js"></script>
   <style>
     :root {
       color-scheme: dark;
@@ -310,10 +311,10 @@
             </div>
           </div>
           <div class="text-lg font-mono font-semibold text-white tracking-tight">
-            <span class="privacy-blur" onclick="togglePrivacy(this)" title="点击展开/隐藏" id="disp-ip">--.--.--.--</span>
+            <span class="privacy-blur" data-action="privacy" title="点击展开/隐藏" id="disp-ip">--.--.--.--</span>
           </div>
           <div class="text-xs text-zinc-400 font-mono mt-1">
-            <span class="privacy-blur" onclick="togglePrivacy(this)" title="点击展开/隐藏" id="disp-domain">vps.yourdomain.com</span>
+            <span class="privacy-blur" data-action="privacy" title="点击展开/隐藏" id="disp-domain">vps.yourdomain.com</span>
           </div>
         </div>
 
@@ -339,7 +340,7 @@
           <div class="text-lg font-mono font-semibold text-emerald-400" id="disp-warp-status">ACTIVE</div>
           <div class="text-xs text-zinc-400 font-mono mt-1 flex items-center gap-1.5" id="disp-warp-ip">
             <span>出口:</span>
-            <span class="privacy-blur" onclick="togglePrivacy(this)" title="点击展开/隐藏" id="disp-warp-val">104.28.205.115 (US)</span>
+            <span class="privacy-blur" data-action="privacy" title="点击展开/隐藏" id="disp-warp-val">104.28.205.115 (US)</span>
           </div>
         </div>
 
@@ -1029,7 +1030,7 @@
                   <span id="audit-flag" class="text-xs font-bold text-zinc-400 border border-zinc-700 rounded px-1.5 py-0.5">IP</span>
                   <div>
                     <div class="flex items-center gap-2">
-                      <span id="audit-ip" class="text-base font-semibold text-white font-mono privacy-blur cursor-pointer" onclick="togglePrivacy(this)" title="点击展开/隐藏">--.--.--.--</span>
+                      <span id="audit-ip" class="text-base font-semibold text-white font-mono privacy-blur cursor-pointer" data-action="privacy" title="点击展开/隐藏">--.--.--.--</span>
                       <span id="audit-purity-badge" class="badge bg-cyan-950/70 border border-cyan-600/30 text-cyan-400 font-mono text-[10px]">A 纯净机房</span>
                     </div>
                     <div id="audit-geo" class="text-xs text-zinc-400 mt-0.5">Phoenix, Arizona, United States</div>
@@ -1077,7 +1078,7 @@
                 </div>
                 <div class="bg-zinc-900/60 p-2.5 rounded border border-zinc-800/60">
                   <div class="text-[10px] text-zinc-500 uppercase font-mono">反向 PTR 解析</div>
-                  <div id="audit-ptr" class="font-mono text-zinc-400 text-[11px] truncate mt-0.5 privacy-blur cursor-pointer" onclick="togglePrivacy(this)" title="点击展开/隐藏">检测中...</div>
+                  <div id="audit-ptr" class="font-mono text-zinc-400 text-[11px] truncate mt-0.5 privacy-blur cursor-pointer" data-action="privacy" title="点击展开/隐藏">检测中...</div>
                 </div>
               </div>
             </div>
@@ -1194,7 +1195,7 @@
               </div>
               <div class="flex items-center gap-2 text-zinc-400 font-mono text-[11px]">
                 <span>WARP 出口:</span>
-                <span id="audit-warp-ip" class="privacy-blur cursor-pointer text-zinc-200" onclick="togglePrivacy(this)" title="点击展开/隐藏">104.28.205.117 (US)</span>
+                <span id="audit-warp-ip" class="privacy-blur cursor-pointer text-zinc-200" data-action="privacy" title="点击展开/隐藏">104.28.205.117 (US)</span>
               </div>
             </div>
           </div>
@@ -1798,7 +1799,7 @@
             <div class="text-xs font-semibold text-zinc-300">修改管理员登录密码</div>
             <div class="grid grid-cols-2 gap-2">
               <input type="password" id="cfg-pwd-old" placeholder="原管理员密码" class="bg-zinc-900 border border-zinc-800 rounded px-2.5 py-1 text-zinc-200 font-mono text-[11px]">
-              <input type="password" id="cfg-pwd-new" placeholder="新密码 (不少于 6 位)" class="bg-zinc-900 border border-zinc-800 rounded px-2.5 py-1 text-zinc-200 font-mono text-[11px]">
+              <input type="password" id="cfg-pwd-new" placeholder="新密码 (12–1024 位)" class="bg-zinc-900 border border-zinc-800 rounded px-2.5 py-1 text-zinc-200 font-mono text-[11px]">
             </div>
             <button class="btn-neutral text-xs py-1 w-full justify-center" onclick="handlePasswordUpdate()">提交修改密码</button>
           </div>
@@ -1983,7 +1984,7 @@
               </div>
               <div class="p-3 rounded-lg bg-zinc-900/80 border border-zinc-800 space-y-1">
                 <div class="text-[11px] text-zinc-500">公网 IPv4 地址</div>
-                <div class="text-xs font-semibold text-purple-400 font-mono privacy-blur" onclick="togglePrivacy(this)" id="wiz-detected-ip">Detecting...</div>
+                <div class="text-xs font-semibold text-purple-400 font-mono privacy-blur" data-action="privacy" id="wiz-detected-ip">Detecting...</div>
               </div>
             </div>
 
@@ -2578,8 +2579,11 @@
         </div>
 
         <div>
-          <label class="block text-zinc-400 mb-1">访问凭证 Token (Secret Sub Token)</label>
+          <label class="block text-zinc-400 mb-1">订阅访问凭证 (Sub Token)</label>
           <input type="password" class="w-full bg-zinc-900 border border-zinc-800 rounded px-3 py-1.5 text-zinc-200 font-mono" id="mesh-form-token" placeholder="远程节点的 sub_token 鉴权凭据">
+          <label class="block text-zinc-400 mt-2 mb-1">监控访问凭证 (Mesh Token)</label>
+          <input type="password" class="w-full bg-zinc-900 border border-zinc-800 rounded px-3 py-1.5 text-zinc-200 font-mono" id="mesh-form-telemetry-token" placeholder="远程节点 security.mesh_token">
+
         </div>
 
         <div class="grid grid-cols-2 gap-3">
@@ -2614,6 +2618,14 @@
   </div>
 
   <script>
+    function escapeHtml(value) { return String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+    function safeHtml(value) { return DOMPurify.sanitize(String(value), {FORBID_TAGS:['style','iframe','object','svg','math'], FORBID_ATTR:['style'], ALLOW_DATA_ATTR:true}); }
+    document.addEventListener('click', event => {
+      const el=event.target.closest('[data-action]'); if(!el) return;
+      const actions={privacy:()=>togglePrivacy(el), toggleTransit:()=>toggleTransit(el.dataset.id,el.dataset.extra==='true'),deleteTransit:()=>deleteTransit(el.dataset.id),toggleCustomNode:()=>toggleCustomNode(el.dataset.id,el.dataset.extra==='true'),deleteCustomNode:()=>deleteCustomNode(el.dataset.id),openEditMeshNodeModal:()=>openEditMeshNodeModal(el.dataset.id),deleteMeshNode:()=>deleteMeshNode(el.dataset.id,el.dataset.extra)};
+      actions[el.dataset.action]?.();
+    });
+
     // Tab switching
     function switchTab(tabId) {
       ['overview', 'rules', 'transits', 'services', 'mesh'].forEach(t => {
@@ -2827,7 +2839,7 @@
           if (list.length === 0) {
             container.innerText = '暂无 IP';
           } else {
-            container.innerHTML = list.slice(0, 4).map(ip => `<div>• ${ip}</div>`).join('');
+            container.innerHTML = safeHtml(list.slice(0, 4).map(ip => `<div>• ${escapeHtml(ip)}</div>`).join(''));
           }
         }
       });
@@ -2900,31 +2912,31 @@
         const res = await fetch('/api/transits');
         const list = await res.json();
         if (!list || list.length === 0) {
-          container.innerHTML = '<div class="text-xs text-zinc-500 p-4 text-center">暂未配置中转专线接入点。点击上方按钮可快速录入。</div>';
+          container.innerHTML = safeHtml('<div class="text-xs text-zinc-500 p-4 text-center">暂未配置中转专线接入点。点击上方按钮可快速录入。</div>');
           return;
         }
 
-        container.innerHTML = list.map(t => `
+        container.innerHTML = safeHtml(list.map(t => `
           <div class="flex items-center justify-between p-3.5 rounded bg-[#161619] border border-zinc-800">
             <div>
               <div class="flex items-center gap-2">
-                <span class="font-semibold text-xs text-zinc-100">${t.name}</span>
+                <span class="font-semibold text-xs text-zinc-100">${escapeHtml(t.name)}</span>
                 <span class="badge ${t.enabled ? 'bg-blue-950/60 text-blue-400 border border-blue-800/40' : 'bg-zinc-800 text-zinc-400'} text-[10px] font-mono">
                   ${t.enabled ? '已启用' : '已停用'}
                 </span>
               </div>
               <div class="text-[11px] text-zinc-400 font-mono mt-1">
-                目标: <span class="privacy-blur" onclick="togglePrivacy(this)" title="点击展开/隐藏">${t.host}</span> • 端口转发: Hy2(${t.hy2_port}) | Reality(${t.reality_port}) | Trojan(${t.trojan_port})
+                目标: <span class="privacy-blur" data-action="privacy" title="点击展开/隐藏">${escapeHtml(t.host)}</span> • 端口转发: Hy2(${escapeHtml(t.hy2_port)}) | Reality(${escapeHtml(t.reality_port)}) | Trojan(${escapeHtml(t.trojan_port)})
               </div>
             </div>
             <div class="flex items-center gap-2">
-              <button class="btn-neutral text-[11px] py-1" onclick="toggleTransit('${t.id}', ${!t.enabled})">${t.enabled ? '停用' : '启用'}</button>
-              <button class="btn-destructive text-[11px] py-1" onclick="deleteTransit('${t.id}')">删除</button>
+              <button class="btn-neutral text-[11px] py-1" data-action="toggleTransit" data-id="${escapeHtml(t.id)}" data-extra="${escapeHtml(!t.enabled)}">${t.enabled ? '停用' : '启用'}</button>
+              <button class="btn-destructive text-[11px] py-1" data-action="deleteTransit" data-id="${escapeHtml(t.id)}">删除</button>
             </div>
           </div>
-        `).join('');
+        `).join(''));
       } catch (e) {
-        container.innerHTML = '<div class="text-xs text-rose-500 p-4">加载失败</div>';
+        container.innerHTML = safeHtml('<div class="text-xs text-rose-500 p-4">加载失败</div>');
       }
     }
 
@@ -2985,34 +2997,34 @@
         const res = await fetch('/api/custom-nodes');
         const list = await res.json();
         if (!list || list.length === 0) {
-          container.innerHTML = '<div class="text-xs text-zinc-500 p-4 text-center">暂未添加独立节点。支持一键导入 VLESS-Reality、Hysteria2、Trojan 等分享链接。</div>';
+          container.innerHTML = safeHtml('<div class="text-xs text-zinc-500 p-4 text-center">暂未添加独立节点。支持一键导入 VLESS-Reality、Hysteria2、Trojan 等分享链接。</div>');
           return;
         }
 
-        container.innerHTML = list.map(n => `
+        container.innerHTML = safeHtml(list.map(n => `
           <div class="flex items-center justify-between p-3.5 rounded bg-[#161619] border border-zinc-800">
             <div>
               <div class="flex items-center gap-2">
-                <span class="font-semibold text-xs text-zinc-100">${n.name}</span>
+                <span class="font-semibold text-xs text-zinc-100">${escapeHtml(n.name)}</span>
                 <span class="badge ${n.enabled ? 'bg-emerald-950/60 text-emerald-400 border border-emerald-800/40' : 'bg-zinc-800 text-zinc-400'} text-[10px] font-mono">
                   ${n.enabled ? '已启用' : '已停用'}
                 </span>
-                <span class="badge bg-zinc-800 text-zinc-300 text-[10px] font-mono uppercase">${n.type}</span>
+                <span class="badge bg-zinc-800 text-zinc-300 text-[10px] font-mono uppercase">${escapeHtml(n.type)}</span>
               </div>
               <div class="text-[11px] text-zinc-400 font-mono mt-1">
-                服务器: <span class="privacy-blur" onclick="togglePrivacy(this)" title="点击展开/隐藏">${n.server}:${n.port}</span>
-                ${n.flow ? ` • 流控: ${n.flow}` : ''}
-                ${n.servername ? ` • SNI: ${n.servername}` : ''}
+                服务器: <span class="privacy-blur" data-action="privacy" title="点击展开/隐藏">${escapeHtml(n.server)}:${escapeHtml(n.port)}</span>
+                ${n.flow ? ` • 流控: ${escapeHtml(n.flow)}` : ''}
+                ${n.servername ? ` • SNI: ${escapeHtml(n.servername)}` : ''}
               </div>
             </div>
             <div class="flex items-center gap-2">
-              <button class="btn-neutral text-[11px] py-1" onclick="toggleCustomNode('${n.id}', ${!n.enabled})">${n.enabled ? '停用' : '启用'}</button>
-              <button class="btn-destructive text-[11px] py-1" onclick="deleteCustomNode('${n.id}')">删除</button>
+              <button class="btn-neutral text-[11px] py-1" data-action="toggleCustomNode" data-id="${escapeHtml(n.id)}" data-extra="${escapeHtml(!n.enabled)}">${n.enabled ? '停用' : '启用'}</button>
+              <button class="btn-destructive text-[11px] py-1" data-action="deleteCustomNode" data-id="${escapeHtml(n.id)}">删除</button>
             </div>
           </div>
-        `).join('');
+        `).join(''));
       } catch (e) {
-        container.innerHTML = '<div class="text-xs text-rose-500 p-4">加载独立节点失败</div>';
+        container.innerHTML = safeHtml('<div class="text-xs text-rose-500 p-4">加载独立节点失败</div>');
       }
     }
 
@@ -3399,8 +3411,8 @@
         alert('请输入原密码和新密码');
         return;
       }
-      if (new_password.length < 6) {
-        alert('新密码长度不能少于 6 位');
+      if (new_password.length < 12 || new_password.length > 1024) {
+        alert('新密码长度必须为 12–1024 位');
         return;
       }
       try {
@@ -3414,6 +3426,7 @@
           alert('管理员密码修改成功！下次访问请使用新密码。');
           document.getElementById('cfg-pwd-old').value = '';
           document.getElementById('cfg-pwd-new').value = '';
+          if (initialPasswordRequired) { initialPasswordRequired=false; closeSettings(); connectWS(); checkFirstRun(); loadServicesStatus(); }
         } else {
           alert('修改失败: ' + (data.detail || '原密码错误'));
         }
@@ -3428,6 +3441,16 @@
       input.type = input.type === 'password' ? 'text' : 'password';
     }
 
+    let initialPasswordRequired = false;
+    function requireInitialPassword(oldPassword = '') {
+      initialPasswordRequired = true;
+      document.getElementById('settings-modal').classList.add('active');
+      document.getElementById('cfg-pwd-old').value = oldPassword;
+      document.getElementById('cfg-pwd-new').focus();
+      document.getElementById('cfg-pwd-new').scrollIntoView({block:'center'});
+      alert('首次登录请先设置一个 12–1024 位的新管理员密码，再完成节点配置。');
+    }
+
     async function checkAuthStatus() {
       try {
         const res = await fetch('/api/auth/check');
@@ -3439,6 +3462,7 @@
           document.getElementById('login-modal').classList.remove('active');
           currentSubToken = data.sub_token || '';
           currentSecretPath = data.secret_path || '/sentinel';
+          if (data.must_change_password) { requireInitialPassword(); return false; }
           const userEl = document.getElementById('nav-username');
           if (userEl && data.username) userEl.innerText = data.username;
           updateAllSubLinks();
@@ -3475,6 +3499,7 @@
           if (userEl) userEl.innerText = data.username;
           document.getElementById('login-modal').classList.remove('active');
           updateAllSubLinks();
+          if (data.must_change_password) { requireInitialPassword(password); document.getElementById('login-password').value = ''; return; }
           connectWS();
           checkFirstRun();
           loadServicesStatus();
@@ -3523,17 +3548,21 @@
 
     // --- WebSocket Stream ---
     let ws = null;
+    let wsRetry = 0, wsTimer = null, statusTimer = null, wsHeartbeat = null;
+    window.addEventListener("pagehide", () => { clearTimeout(wsTimer); clearInterval(statusTimer); clearInterval(wsHeartbeat); if(ws) { ws.onclose=null; ws.close(); } });
     function connectWS() {
       if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) {
         return;
       }
       const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-      const tokenParam = currentSubToken ? `?token=${currentSubToken}` : '';
+      const tokenParam = '';
       const wsUrl = `${proto}//${window.location.host}/ws/live${tokenParam}`;
       ws = new WebSocket(wsUrl);
 
+      ws.onopen = () => { wsRetry=0; clearInterval(statusTimer); statusTimer=null; clearInterval(wsHeartbeat); wsHeartbeat=setInterval(() => { if(ws?.readyState===WebSocket.OPEN) ws.send('ping'); },30000); };
       ws.onmessage = (event) => {
         try {
+          if(event.data==='pong') return;
           const payload = JSON.parse(event.data);
           if (payload.type === 'initial' || payload.type === 'telemetry') {
             updateOverview(payload.state, payload.sentinel);
@@ -3548,13 +3577,16 @@
       };
 
       ws.onclose = (e) => {
+        clearInterval(wsHeartbeat); wsHeartbeat=null;
         if (e.code === 1008) {
           console.warn('WebSocket connection rejected: Unauthenticated');
           document.getElementById('login-modal').classList.add('active');
           return;
         }
         loadOverviewStatus();
-        setTimeout(connectWS, 3000);
+        if(!statusTimer) statusTimer=setInterval(loadOverviewStatus, 15000);
+        clearTimeout(wsTimer);
+        wsTimer=setTimeout(connectWS, Math.min(60000, 3000 * 2 ** Math.min(wsRetry++,5)) + Math.random()*1000);
       };
     }
 
@@ -3563,11 +3595,11 @@
       const row = document.createElement('div');
       const levelColor = log.level === 'WARN' ? 'text-amber-400' : (log.level === 'ERROR' ? 'text-rose-400' : 'text-blue-400');
       row.className = 'flex gap-2.5';
-      row.innerHTML = `
-        <span class="text-zinc-600 shrink-0">[${log.time || '--:--:--'}]</span>
-        <span class="${levelColor} shrink-0">[${log.level || 'INFO'}]</span>
-        <span class="text-zinc-300 break-all">${log.msg || ''}</span>
-      `;
+      row.innerHTML = safeHtml(`
+        <span class="text-zinc-600 shrink-0">[${escapeHtml(log.time || '--:--:--')}]</span>
+        <span class="${escapeHtml(levelColor)} shrink-0">[${escapeHtml(log.level || 'INFO')}]</span>
+        <span class="text-zinc-300 break-all">${escapeHtml(log.msg || '')}</span>
+      `);
       body.appendChild(row);
       body.scrollTop = body.scrollHeight;
     }
@@ -3625,7 +3657,7 @@
         if (wVal) {
           wVal.innerText = `${state.warp.ip || 'N/A'} (${state.warp.loc || 'US'})`;
         } else {
-          document.getElementById('disp-warp-ip').innerHTML = `<span>出口:</span> <span class="privacy-blur" onclick="togglePrivacy(this)" title="点击展开/隐藏" id="disp-warp-val">${state.warp.ip || 'N/A'} (${state.warp.loc || 'US'})</span>`;
+          document.getElementById('disp-warp-ip').innerHTML = safeHtml(`<span>出口:</span> <span class="privacy-blur" data-action="privacy" title="点击展开/隐藏" id="disp-warp-val">${escapeHtml(state.warp.ip || 'N/A')} (${escapeHtml(state.warp.loc || 'US')})</span>`);
         }
         const wStatus = document.getElementById('disp-warp-status');
         if (wStatus) {
@@ -4016,7 +4048,7 @@
 
           if (data.config?.cloudflare?.zone_name) {
             const zSel = document.getElementById('wiz-cf-zone-select');
-            zSel.innerHTML = `<option value="${data.config.cloudflare.zone_name}">${data.config.cloudflare.zone_name}</option>`;
+            zSel.innerHTML = safeHtml(`<option value="${escapeHtml(data.config.cloudflare.zone_name)}">${escapeHtml(data.config.cloudflare.zone_name)}</option>`);
           }
           if (data.config?.cloudflare?.record_name) {
             const sub = data.config.cloudflare.record_name.split('.')[0] || 'vps';
@@ -4101,7 +4133,7 @@
         const data = await res.json();
         if (data.success && data.zones && data.zones.length > 0) {
           const sel = document.getElementById('wiz-cf-zone-select');
-          sel.innerHTML = data.zones.map(z => `<option value="${z.name}">${z.name}</option>`).join('');
+          sel.innerHTML = safeHtml(data.zones.map(z => `<option value="${escapeHtml(z.name)}">${escapeHtml(z.name)}</option>`).join(''));
           document.getElementById('wiz-cf-zone-manual').classList.add('hidden');
           wizUpdatePreviewRecord();
           alert(`成功拉取到 ${data.zones.length} 个 Cloudflare 域名！`);
@@ -4556,7 +4588,7 @@
             return `<div class="bg-zinc-900/70 p-1 rounded border ${colorClass}">${d.name}: ${statusText}</div>`;
           }).join('');
           const listEl = document.getElementById('audit-dnsbl-list');
-          if (listEl) listEl.innerHTML = listHtml;
+          if (listEl) listEl.innerHTML = safeHtml(listHtml);
         }
 
         // Unlock Matrix
@@ -4867,7 +4899,7 @@
               </tr>
             `;
           }).join('');
-          tbody.innerHTML = rowsHtml;
+          tbody.innerHTML = safeHtml(rowsHtml);
         }
 
         // Calculate and update cn avg
@@ -4975,28 +5007,28 @@
       const container = document.getElementById('traffic-chart-container');
       if (!container) return;
       if (!history || history.length === 0) {
-        container.innerHTML = '<div class="text-zinc-600 text-xs font-mono m-auto">暂无历史流量记录</div>';
+        container.innerHTML = safeHtml('<div class="text-zinc-600 text-xs font-mono m-auto">暂无历史流量记录</div>');
         return;
       }
 
       const maxVal = Math.max(...history.map(h => Math.max(h.sent_gb || 0, h.recv_gb || 0)), 1);
 
-      container.innerHTML = history.map(item => {
+      container.innerHTML = safeHtml(history.map(item => {
         const sentHeight = Math.max(4, Math.round(((item.sent_gb || 0) / maxVal) * 90));
         const recvHeight = Math.max(2, Math.round(((item.recv_gb || 0) / maxVal) * 90));
         const dateShort = (item.date || '').slice(5);
-        const title = `${item.date}\n出站: ${(item.sent_gb || 0).toFixed(2)} GB\n入站: ${(item.recv_gb || 0).toFixed(2)} GB\n总计: ${(item.total_gb || 0).toFixed(2)} GB`;
+        const title = `${escapeHtml(item.date)}\n出站: ${(item.sent_gb || 0).toFixed(2)} GB\n入站: ${(item.recv_gb || 0).toFixed(2)} GB\n总计: ${(item.total_gb || 0).toFixed(2)} GB`;
 
         return `
-          <div class="flex-1 min-w-[20px] max-w-[36px] flex flex-col items-center justify-end h-full group relative cursor-pointer" title="${title}">
+          <div class="flex-1 min-w-[20px] max-w-[36px] flex flex-col items-center justify-end h-full group relative cursor-pointer" title="${escapeHtml(title)}">
             <div class="w-full flex items-end justify-center gap-0.5 pb-1">
-              <div class="w-1.5 bg-blue-500/80 group-hover:bg-blue-400 rounded-t transition-all" style="height: ${sentHeight}px"></div>
-              <div class="w-1.5 bg-emerald-500/50 group-hover:bg-emerald-400 rounded-t transition-all" style="height: ${recvHeight}px"></div>
+              <div class="w-1.5 bg-blue-500/80 group-hover:bg-blue-400 rounded-t transition-all" style="height: ${escapeHtml(sentHeight)}px"></div>
+              <div class="w-1.5 bg-emerald-500/50 group-hover:bg-emerald-400 rounded-t transition-all" style="height: ${escapeHtml(recvHeight)}px"></div>
             </div>
-            <span class="text-[9px] font-mono text-zinc-400 group-hover:text-zinc-300 truncate w-full text-center">${dateShort}</span>
+            <span class="text-[9px] font-mono text-zinc-400 group-hover:text-zinc-300 truncate w-full text-center">${escapeHtml(dateShort)}</span>
           </div>
         `;
-      }).join('');
+      }).join(''));
     }
 
     function openTrafficConfigModal() {
@@ -5096,11 +5128,11 @@
       if (!grid) return;
 
       if (!nodes || nodes.length === 0) {
-        grid.innerHTML = '<div class="col-span-full text-center py-10 text-zinc-500 text-xs font-mono">暂无纳管节点，点击上方“纳管新节点”添加</div>';
+        grid.innerHTML = safeHtml('<div class="col-span-full text-center py-10 text-zinc-500 text-xs font-mono">暂无纳管节点，点击上方“纳管新节点”添加</div>');
         return;
       }
 
-      grid.innerHTML = nodes.map(n => {
+      grid.innerHTML = safeHtml(nodes.map(n => {
         const isMaster = !!n.is_local;
         const st = n.last_status || {};
         const isOnline = !!st.online;
@@ -5112,8 +5144,8 @@
           ? `<span class="badge bg-indigo-950/80 border border-indigo-600/40 text-indigo-300 text-[10px]">Master 本地主控</span>`
           : `<span class="badge bg-zinc-800 border border-zinc-700 text-zinc-300 text-[10px]">Probe 集群探针</span>`;
 
-        const cpu = st.cpu_pct !== undefined ? `${st.cpu_pct}%` : '--';
-        const mem = st.mem_pct !== undefined ? `${st.mem_pct}%` : '--';
+        const cpu = st.cpu_pct !== undefined ? `${escapeHtml(st.cpu_pct)}%` : '--';
+        const mem = st.mem_pct !== undefined ? `${escapeHtml(st.mem_pct)}%` : '--';
         const ip = st.pub_ip || n.host || '--';
         const uptime = st.uptime || '--';
         const loc = n.location || 'Cloud Node';
@@ -5124,8 +5156,8 @@
           ? `<span class="text-[11px] text-zinc-500 font-mono">本地主控实例</span>`
           : `
             <div class="flex items-center gap-1.5">
-              <button class="btn-neutral text-[11px] px-2 py-0.5" onclick="openEditMeshNodeModal('${n.id}')">编辑</button>
-              <button class="btn-neutral text-[11px] px-2 py-0.5 text-rose-400 hover:text-rose-300 hover:border-rose-700/50" onclick="deleteMeshNode('${n.id}', '${n.name}')">移除</button>
+              <button class="btn-neutral text-[11px] px-2 py-0.5" data-action="openEditMeshNodeModal" data-id="${escapeHtml(n.id)}">编辑</button>
+              <button class="btn-neutral text-[11px] px-2 py-0.5 text-rose-400 hover:text-rose-300 hover:border-rose-700/50" data-action="deleteMeshNode" data-id="${escapeHtml(n.id)}" data-extra="${escapeHtml(n.name)}">移除</button>
             </div>
           `;
 
@@ -5136,10 +5168,10 @@
             <div class="flex items-start justify-between">
               <div class="space-y-0.5">
                 <div class="flex items-center gap-1.5">
-                  <span class="font-semibold text-white text-xs">${n.name}</span>
-                  <span class="text-[10px] text-zinc-400 bg-zinc-800/60 px-1.5 py-0.5 rounded">${loc}</span>
+                  <span class="font-semibold text-white text-xs">${escapeHtml(n.name)}</span>
+                  <span class="text-[10px] text-zinc-400 bg-zinc-800/60 px-1.5 py-0.5 rounded">${escapeHtml(loc)}</span>
                 </div>
-                <div class="text-[11px] font-mono text-zinc-400 truncate max-w-[220px]">${ip}</div>
+                <div class="text-[11px] font-mono text-zinc-400 truncate max-w-[220px]">${escapeHtml(ip)}</div>
               </div>
               <div class="flex flex-col items-end gap-1">
                 ${statusBadge}
@@ -5150,34 +5182,34 @@
             <div class="grid grid-cols-2 gap-2 text-[11px] font-mono p-2.5 rounded bg-[#121215] border border-zinc-800/50">
               <div>
                 <span class="text-zinc-500">CPU:</span>
-                <span class="text-zinc-200 ml-1 font-semibold">${cpu}</span>
+                <span class="text-zinc-200 ml-1 font-semibold">${escapeHtml(cpu)}</span>
               </div>
               <div>
                 <span class="text-zinc-500">RAM:</span>
-                <span class="text-zinc-200 ml-1 font-semibold">${mem}</span>
+                <span class="text-zinc-200 ml-1 font-semibold">${escapeHtml(mem)}</span>
               </div>
               <div>
                 <span class="text-zinc-500">下行:</span>
-                <span class="text-zinc-200 ml-1">${rx} KB/s</span>
+                <span class="text-zinc-200 ml-1">${escapeHtml(rx)} KB/s</span>
               </div>
               <div>
                 <span class="text-zinc-500">上行:</span>
-                <span class="text-zinc-200 ml-1">${tx} KB/s</span>
+                <span class="text-zinc-200 ml-1">${escapeHtml(tx)} KB/s</span>
               </div>
               <div class="col-span-2 text-zinc-500 text-[10px]">
-                运行: <span class="text-zinc-400">${uptime}</span>
+                运行: <span class="text-zinc-400">${escapeHtml(uptime)}</span>
               </div>
             </div>
 
             <div class="flex items-center justify-between pt-2 border-t border-zinc-800/60">
               <div class="text-[10px] text-zinc-500 font-mono">
-                探针回传: ${lastSeen}
+                探针回传: ${escapeHtml(lastSeen)}
               </div>
               ${actionButtons}
             </div>
           </div>
         `;
-      }).join('');
+      }).join(''));
     }
 
     function openAddMeshNodeModal() {
@@ -5186,6 +5218,7 @@
       document.getElementById('mesh-form-name').value = '';
       document.getElementById('mesh-form-url').value = '';
       document.getElementById('mesh-form-token').value = '';
+      document.getElementById('mesh-form-telemetry-token').value = '';
       document.getElementById('mesh-form-location').value = '';
       document.getElementById('mesh-form-timeout').value = '5';
       document.getElementById('mesh-form-sync-proxy').checked = true;
@@ -5203,6 +5236,7 @@
       document.getElementById('mesh-form-name').value = node.name || '';
       document.getElementById('mesh-form-url').value = node.host || '';
       document.getElementById('mesh-form-token').value = node.api_token || '';
+      document.getElementById('mesh-form-telemetry-token').value = node.telemetry_token || '';
       document.getElementById('mesh-form-location').value = node.location || '';
       document.getElementById('mesh-node-modal').classList.add('active');
     }
@@ -5227,6 +5261,7 @@
         name,
         host: endpoint_url,
         api_token: token,
+        telemetry_token: document.getElementById('mesh-form-telemetry-token').value.trim(),
         location: location || 'Global',
         tag: 'REMOTE',
         enabled: true
@@ -5497,7 +5532,7 @@
       const originalText = btn ? btn.innerHTML : '';
       if (btn) {
         btn.disabled = true;
-        btn.innerHTML = '<span>正在执行同步...</span>';
+        btn.innerHTML = safeHtml('<span>正在执行同步...</span>');
       }
 
       try {
@@ -5532,7 +5567,7 @@
       } finally {
         if (btn) {
           btn.disabled = false;
-          btn.innerHTML = originalText;
+          btn.innerHTML = safeHtml(originalText);
         }
       }
     }

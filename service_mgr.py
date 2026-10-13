@@ -1,23 +1,14 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-# ==============================================================================
-# Oracle Sentinel - Service Management Abstraction
-# Decouples systemd from container and lightweight Linux environments
-# ==============================================================================
-
-import os
-import shutil
+"""Explicit service management; unsupported actions never report success."""
 import logging
+import os
+import re
+import shutil
 import subprocess
 from typing import Tuple
-
 logger = logging.getLogger('ServiceManager')
 
 
 class BaseServiceManager:
-    """
-    Abstract interface for managing system services (e.g. x-ui, vpsentinel, realm).
-    """
     def reload(self, service_name: str) -> Tuple[bool, str]:
         raise NotImplementedError
 
@@ -26,82 +17,70 @@ class BaseServiceManager:
 
     def is_active(self, service_name: str) -> bool:
         raise NotImplementedError
+
+
+def validate_service(name):
+    if not re.fullmatch(r'[a-zA-Z0-9_.@-]{1,128}', name):
+        raise ValueError('Invalid service name')
+    return name
 
 
 class SystemdServiceManager(BaseServiceManager):
-    """
-    Standard service manager using systemctl commands.
-    """
-    def reload(self, service_name: str) -> Tuple[bool, str]:
-        cmd = f"systemctl reload {service_name} 2>/dev/null || systemctl restart {service_name} 2>/dev/null"
+    def _run(self, action, name):
+        validate_service(name)
         try:
-            res = subprocess.run(cmd, shell=True, capture_output=True, text=True)
-            ok = (res.returncode == 0)
-            msg = res.stdout.strip() or res.stderr.strip() or ("Reloaded successfully" if ok else "Reload failed")
-            return ok, msg
-        except Exception as e:
-            return False, str(e)
+            result = subprocess.run(['systemctl', action, name], capture_output=True, text=True, timeout=20)
+            return result.returncode == 0, (result.stdout + result.stderr).strip()[:4096]
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            return False, str(exc)
 
-    def restart(self, service_name: str) -> Tuple[bool, str]:
-        cmd = f"systemctl restart {service_name} 2>/dev/null"
-        try:
-            res = subprocess.run(cmd, shell=True, capture_output=True, text=True)
-            ok = (res.returncode == 0)
-            msg = res.stdout.strip() or res.stderr.strip() or ("Restarted successfully" if ok else "Restart failed")
-            return ok, msg
-        except Exception as e:
-            return False, str(e)
+    def reload(self, service_name):
+        ok, detail = self._run('reload', service_name)
+        return (ok, detail) if ok else self._run('restart', service_name)
 
-    def is_active(self, service_name: str) -> bool:
-        try:
-            res = subprocess.run(f"systemctl is-active --quiet {service_name}", shell=True)
-            return res.returncode == 0
-        except Exception:
-            return False
+    def restart(self, service_name):
+        return self._run('restart', service_name)
+
+    def is_active(self, service_name):
+        return self._run('is-active', service_name)[0]
 
 
 class NoopServiceManager(BaseServiceManager):
-    """
-    Fallback service manager for Docker containers or non-systemd environments.
-    Logs actions without executing failing systemctl commands.
-    """
-    def reload(self, service_name: str) -> Tuple[bool, str]:
-        logger.info(f"Container/No-systemd mode: simulated service reload for '{service_name}'")
-        return True, f"Simulated reload for {service_name}"
+    def reload(self, service_name):
+        return False, 'unsupported: configure a real reload backend or hook'
 
-    def restart(self, service_name: str) -> Tuple[bool, str]:
-        logger.info(f"Container/No-systemd mode: simulated service restart for '{service_name}'")
-        return True, f"Simulated restart for {service_name}"
+    def restart(self, service_name):
+        return False, 'unsupported: configure a real restart backend or hook'
 
-    def is_active(self, service_name: str) -> bool:
-        return True
+    def is_active(self, service_name):
+        return False
 
 
 _global_service_manager = None
 
 
-def is_systemd_available() -> bool:
-    """
-    Checks if systemd is actively running and systemctl executable is present.
-    """
-    return os.path.exists('/run/systemd/system') and (shutil.which('systemctl') is not None)
+def is_systemd_available():
+    return os.path.exists('/run/systemd/system') and shutil.which('systemctl') is not None
 
 
-def get_service_manager() -> BaseServiceManager:
-    """
-    Returns the appropriate service manager instance based on host environment.
-    """
+def get_service_manager():
     if _global_service_manager is not None:
         return _global_service_manager
+    from privileged_helper import SOCKET_PATH
+    if os.path.exists(SOCKET_PATH) and os.geteuid() != 0:
+        return BrokerServiceManager()
+    return SystemdServiceManager() if is_systemd_available() else NoopServiceManager()
 
-    if is_systemd_available():
-        return SystemdServiceManager()
-    return NoopServiceManager()
 
-
-def set_service_manager(mgr: BaseServiceManager):
-    """
-    Allows injecting a custom or mock service manager during testing or custom deployment.
-    """
+def set_service_manager(mgr):
     global _global_service_manager
     _global_service_manager = mgr
+
+class BrokerServiceManager(SystemdServiceManager):
+    def _run(self, action, name):
+        from privileged_helper import request_operation
+        try:
+            result = request_operation({'operation': 'service', 'name': name, 'action': action})
+            return bool(result['success']), result.get('detail', '')
+        except (OSError, ValueError) as exc:
+            return False, str(exc)

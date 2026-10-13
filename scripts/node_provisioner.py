@@ -22,9 +22,10 @@ import logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
 logger = logging.getLogger('NodeProvisioner')
 
-DB_PATH = '/etc/x-ui/x-ui.db'
-CERT_FILE = '/etc/vpsentinel/cert/fullchain.pem' if os.path.exists('/etc/vpsentinel/cert/fullchain.pem') else '/etc/oracle-sentinel/cert/fullchain.pem'
-KEY_FILE = '/etc/vpsentinel/cert/privkey.pem' if os.path.exists('/etc/vpsentinel/cert/privkey.pem') else '/etc/oracle-sentinel/cert/privkey.pem'
+from paths import XUI_DB_PATH, CERT_DIR
+DB_PATH = XUI_DB_PATH
+CERT_FILE = os.path.join(CERT_DIR, 'fullchain.pem')
+KEY_FILE = os.path.join(CERT_DIR, 'privkey.pem')
 
 def generate_x25519_keypair():
     """Generates X25519 private and public keys using cryptography or xray CLI."""
@@ -93,10 +94,8 @@ def check_3x_ui_installed():
 
 def install_3x_ui():
     """Installs 3x-ui silently via official installer."""
-    logger.info("Installing 3x-ui...")
-    cmd = "curl -Ls https://raw.githubusercontent.com/mhsanaei/3x-ui/master/install.sh | bash"
-    res = subprocess.run(cmd, shell=True)
-    return res.returncode == 0
+    logger.error('Automatic unverified 3x-ui installer is disabled. Install a verified release first.')
+    return False
 
 def provision_nodes(db_path=DB_PATH, domain='vps.example.com', cert_path=CERT_FILE, key_path=KEY_FILE, force=False):
     """
@@ -105,6 +104,12 @@ def provision_nodes(db_path=DB_PATH, domain='vps.example.com', cert_path=CERT_FI
       2. Hysteria 2 on :443
       3. Trojan-TLS on :2083
     """
+    from privileged_helper import SOCKET_PATH, request_operation
+    if os.geteuid() != 0 and os.path.exists(SOCKET_PATH) and db_path == '/etc/x-ui/x-ui.db':
+        result = request_operation({'operation': 'provision', 'domain': domain, 'force': force})
+        if not result.get('success'):
+            raise RuntimeError(result.get('detail', 'Provisioning failed'))
+        return True
     if not os.path.exists(db_path):
         os.makedirs(os.path.dirname(db_path), exist_ok=True)
         # Initialize basic table if db file doesn't exist
@@ -320,10 +325,10 @@ def provision_nodes(db_path=DB_PATH, domain='vps.example.com', cert_path=CERT_FI
             logger.info(f"  + [{proto}] {name} on port {port}")
         # Restart x-ui if service exists
         try:
-            subprocess.run("systemctl restart x-ui", shell=True, check=False)
+            subprocess.run(['systemctl', 'restart', 'x-ui'], check=True, timeout=30)
             logger.info("Restarted x-ui service to apply changes.")
-        except Exception:
-            pass
+        except Exception as exc:
+            raise RuntimeError('Nodes were saved but x-ui restart failed') from exc
     else:
         logger.info("No nodes added (required ports 8443, 443, 2083 already occupied).")
 

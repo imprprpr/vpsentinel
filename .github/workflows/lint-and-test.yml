@@ -1,40 +1,50 @@
-name: Lint & Syntax Check
-
+name: Security and regression checks
 on:
   push:
-    branches: [ "main" ]
+    branches: [main, 'codex/**']
   pull_request:
-    branches: [ "main" ]
-
+    branches: [main]
+permissions:
+  contents: read
 jobs:
-  build:
+  regression:
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        python-version: ["3.10", "3.11", "3.12"]
-
+        python-version: ['3.10', '3.12', '3.14']
     steps:
-    - uses: actions/checkout@v4
-
-    - name: Set up Python ${{ matrix.python-version }}
-      uses: actions/setup-python@v5
-      with:
-        python-version: ${{ matrix.python-version }}
-
-    - name: Install dependencies
-      run: |
-        python -m pip install --upgrade pip
-        pip install flake8
-        if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
-
-    - name: Lint with flake8 (Syntax errors & undefined names)
-      run: |
-        # stop the build if there are Python syntax errors or undefined names
-        flake8 . --count --select=E9,F63,F7,F82 --show-source --statistics --exclude=venv
-
-    - name: Run unit tests
-      env:
-        PYTHONPATH: .
-      run: |
-        python -m unittest discover -s tests -t . -v
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '24'
+      - name: Install locked dependencies
+        run: |
+          python -m pip install --require-hashes -r requirements.txt
+          python -m pip install flake8==7.4.1
+          npm ci --ignore-scripts
+      - name: Syntax and undefined names
+        run: |
+          flake8 . --select=E9,F63,F7,F82 --exclude=node_modules,.git
+          for file in scripts/*.sh; do bash -n "$file"; done
+      - name: Isolated backend regression
+        run: python -m unittest discover -s tests -t . -v
+      - name: Frontend injection and interaction regression
+        run: npm test
+  dependency-audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: '3.10'
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: '24'
+      - run: |
+          python -m pip install pip-audit==2.10.1
+          pip-audit -r requirements.txt
+          npm audit --audit-level=moderate

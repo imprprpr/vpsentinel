@@ -1,3 +1,4 @@
+from secure_files import transactional
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
@@ -117,6 +118,7 @@ class CleanIPManager:
         return result
 
     @classmethod
+    @transactional
     def save_clean_ips(cls, clean_ips_dict):
         cfg = ConfigManager.load()
         if "edgetunnel" not in cfg:

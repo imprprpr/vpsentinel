@@ -5,6 +5,7 @@
 # ==============================================================================
 
 import os
+from secure_files import atomic_write, transactional
 import sys
 import time
 import json
@@ -32,7 +33,7 @@ except ImportError:
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
 logger = logging.getLogger('SentinelCore')
 
-from paths import BASE_DIR, CONFIG_PATH, get_config_path
+from paths import BASE_DIR, CONFIG_PATH, OCI_DIR, get_config_path
 METADATA_INSTANCE_URL = 'http://169.254.169.254/opc/v2/instance/'
 METADATA_VNICS_URL = 'http://169.254.169.254/opc/v2/vnics/'
 
@@ -68,7 +69,7 @@ DEFAULT_CONFIG = {
     },
     'oci': {
         'auth_method': 'config_file',
-        'config_path': '/root/.oci/config'
+        'config_path': os.path.join(OCI_DIR, 'config')
     },
     'monitor': {
         'interval_sec': 15,
@@ -306,7 +307,7 @@ class ConfigManager:
             if os.path.exists(cfg_path):
                 try:
                     st = os.stat(cfg_path)
-                    current_fp = (st.st_mtime_ns, st.st_size, st.st_ino)
+                    current_fp = (os.path.abspath(cfg_path), st.st_mtime_ns, st.st_size, st.st_ino)
                     if cls._cached_cfg is not None and cls._cached_fingerprint == current_fp:
                         return copy.deepcopy(cls._cached_cfg)
                     with open(cfg_path, 'r', encoding='utf-8') as f:
@@ -319,7 +320,7 @@ class ConfigManager:
                         return copy.deepcopy(merged)
                 except Exception as e:
                     logger.error(f'Error reading {cfg_path}: {e}')
-                    if cls._cached_cfg is not None:
+                    if cls._cached_cfg is not None and cls._cached_fingerprint and cls._cached_fingerprint[0] == os.path.abspath(cfg_path):
                         logger.warning('Falling back to last valid cached configuration')
                         return copy.deepcopy(cls._cached_cfg)
             else:
@@ -329,26 +330,16 @@ class ConfigManager:
             return copy.deepcopy(DEFAULT_CONFIG)
 
     @classmethod
+    @transactional
     def save(cls, cfg):
         with cls._lock:
             cfg_path = get_active_config_path()
             try:
-                config_dir = os.path.dirname(os.path.abspath(cfg_path))
-                os.makedirs(config_dir, exist_ok=True)
-                tmp_path = f"{cfg_path}.tmp.{os.getpid()}_{time.time_ns()}"
-                with open(tmp_path, 'w', encoding='utf-8') as f:
-                    json.dump(cfg, f, indent=2, ensure_ascii=False)
-                    f.flush()
-                    os.fsync(f.fileno())
-                os.replace(tmp_path, cfg_path)
-                try:
-                    os.chmod(cfg_path, 0o600)
-                except OSError as e:
-                    logger.warning(f"Failed to chmod {cfg_path}: {e}")
+                atomic_write(cfg_path, json.dumps(cfg, indent=2, ensure_ascii=False))
                 try:
                     st = os.stat(cfg_path)
                     cls._cached_cfg = _deep_merge_dict(DEFAULT_CONFIG, cfg)
-                    cls._cached_fingerprint = (st.st_mtime_ns, st.st_size, st.st_ino)
+                    cls._cached_fingerprint = (os.path.abspath(cfg_path), st.st_mtime_ns, st.st_size, st.st_ino)
                 except Exception:
                     cls._cached_cfg = None
                     cls._cached_fingerprint = None
@@ -356,7 +347,7 @@ class ConfigManager:
                 return True
             except Exception as e:
                 logger.error(f'Error saving {cfg_path}: {e}')
-                return False
+                raise OSError('Configuration could not be persisted') from e
 
     @classmethod
     def invalidate_cache(cls):
@@ -366,6 +357,7 @@ class ConfigManager:
         invalidate_cloud_info_cache()
 
     @classmethod
+    @transactional
     def update(cls, mutator):
         """Atomically reads, mutates, and saves config under a single lock."""
         with cls._lock:
@@ -374,12 +366,13 @@ class ConfigManager:
                 should_save = mutator(cfg)
             except Exception as e:
                 logger.error(f"Config mutator failed: {e}")
-                return False
+                raise
             if should_save is False:
                 return False
             return cls.save(cfg)
 
     @classmethod
+    @transactional
     def update_key(cls, key, value):
         with cls._lock:
             cfg = cls.load()
@@ -403,6 +396,7 @@ class SystemMonitor:
         self.last_net_io = psutil.net_io_counters()
         self.last_net_time = time.time()
         self.consecutive_failures = 0
+        self._state_lock = threading.RLock()
         self._state_cache = None
         self._state_cache_time = 0.0
         self._cache_ttl = 5.0
@@ -555,6 +549,10 @@ class SystemMonitor:
         }
 
     def get_full_state(self, force_refresh: bool = False):
+        with self._state_lock:
+            return copy.deepcopy(self._collect_full_state(force_refresh))
+
+    def _collect_full_state(self, force_refresh: bool = False):
         now = time.time()
         if not force_refresh and self._state_cache is not None and (now - self._state_cache_time < self._cache_ttl):
             return self._state_cache
@@ -576,7 +574,7 @@ class SystemMonitor:
         nodes = [
             {
                 'id': 'vless-reality',
-                'name': 'Oracle-US',
+                'name': 'VPS-Reality',
                 'proto': 'VLESS-Reality',
                 'port': 8443,
                 'sni': 'swdist.apple.com',
@@ -584,7 +582,7 @@ class SystemMonitor:
             },
             {
                 'id': 'hy2',
-                'name': 'Oracle-Hy2',
+                'name': 'VPS-Hy2',
                 'proto': 'Hysteria 2',
                 'port': 443,
                 'hop': '20000-40000 (iptables active)',
@@ -592,7 +590,7 @@ class SystemMonitor:
             },
             {
                 'id': 'trojan',
-                'name': 'Oracle-Trojan',
+                'name': 'VPS-Trojan',
                 'proto': 'Trojan-TLS',
                 'port': 2083,
                 'sni': domain or 'vps.example.com',
@@ -733,7 +731,8 @@ class OracleCloudProvider(BaseCloudProvider):
                 self.client.delete_public_ip(pub_ip.id)
                 time.sleep(2)
         except Exception as e:
-            logger.warning(f'Notice on fetching old public IP: {e}')
+            if getattr(e, 'status', None) != 404:
+                raise RuntimeError('Cannot safely release the previous OCI address') from e
 
         # Create new public IP
         logger.info('Allocating new Ephemeral Public IP from Oracle Cloud pool...')
@@ -870,10 +869,22 @@ class LightsailCloudProvider(BaseCloudProvider):
 
         # 3. Attach new static IP to instance
         logger.info(f"Attaching {new_static_name} to instance {self.instance_name}...")
-        self._call_api('AttachStaticIp', {
-            'staticIpName': new_static_name,
-            'instanceName': self.instance_name
-        })
+        try:
+            self._call_api('AttachStaticIp', {'staticIpName': new_static_name, 'instanceName': self.instance_name})
+            detail = self._call_api('GetStaticIp', {'staticIpName': new_static_name}).get('staticIp', {})
+            if detail.get('attachedTo') != self.instance_name or not detail.get('ipAddress'):
+                raise RuntimeError('Lightsail did not confirm the new address attachment')
+        except Exception:
+            # Release only after confirming it is not attached; uncertain operations need manual reconciliation.
+            try:
+                detail = self._call_api('GetStaticIp', {'staticIpName': new_static_name}).get('staticIp', {})
+                if not detail.get('attachedTo'):
+                    self._call_api('ReleaseStaticIp', {'staticIpName': new_static_name})
+                for old_name in old_static_ip_names:
+                    self._call_api('AttachStaticIp', {'staticIpName': old_name, 'instanceName': self.instance_name})
+            except Exception as recovery_error:
+                logger.error('Lightsail compensation needs manual reconciliation: %s', recovery_error)
+            raise
 
         # 4. Release old static IP(s) to avoid unattached IP charges
         for old_name in old_static_ip_names:
@@ -951,6 +962,8 @@ class HetznerCloudProvider(BaseCloudProvider):
         if not self.server_id:
             raise ValueError("Hetzner server_id is required to change public IP.")
         
+        if self.ip_type == 'primary' and not ConfigManager.load().get('hetzner', {}).get('external_controller', False):
+            raise RuntimeError('Primary IP rotation requires an external controller; self-hosted shutdown is unsafe. Use floating IP mode.')
         logger.info(f"Initiating Hetzner Cloud IP replacement for server: {self.server_id} (mode: {self.ip_type})")
         
         # 1. Fetch server information
@@ -1003,46 +1016,33 @@ class HetznerCloudProvider(BaseCloudProvider):
             new_pip_id = new_pip_info.get('id')
             new_ip_addr = new_pip_info.get('ip')
 
-            # Hetzner requires server to be off to unassign/assign primary IP
-            if is_running:
-                logger.info(f"Shutting down Hetzner server {self.server_id} to perform Primary IP reassignment...")
-                r_off = requests.post(f"{self.base_url}/servers/{self.server_id}/actions/poweroff", headers=self._headers(), timeout=15)
-                if r_off.status_code in (200, 201):
-                    act_id = r_off.json().get('action', {}).get('id')
-                    if act_id:
-                        self._wait_action(act_id, timeout=30)
-                for _ in range(15):
-                    time.sleep(2)
-                    chk = requests.get(f"{self.base_url}/servers/{self.server_id}", headers=self._headers(), timeout=10).json()
-                    if chk.get('server', {}).get('status') == 'off':
-                        break
-
-            # Unassign old primary IP if existed
-            if old_pip_id:
-                try:
-                    logger.info(f"Unassigning old Primary IP {old_pip_id}...")
-                    r_un = requests.post(f"{self.base_url}/primary_ips/{old_pip_id}/actions/unassign", headers=self._headers(), timeout=15)
-                    if r_un.status_code in (200, 201):
-                        act_id = r_un.json().get('action', {}).get('id')
-                        if act_id:
-                            self._wait_action(act_id, timeout=30)
-                except Exception as e:
-                    logger.warning(f"Notice unassigning old Primary IP: {e}")
-
-            # Assign new primary IP
-            logger.info(f"Assigning new Primary IP {new_pip_id} to server {self.server_id}...")
-            r_as = requests.post(f"{self.base_url}/primary_ips/{new_pip_id}/actions/assign", headers=self._headers(), json={'server': int(self.server_id)}, timeout=15)
-            if r_as.status_code in (200, 201):
-                act_id = r_as.json().get('action', {}).get('id')
-                if act_id:
-                    self._wait_action(act_id, timeout=30)
-
-            # Power server back on
-            logger.info(f"Powering server {self.server_id} back on...")
+            def action(path, payload=None):
+                response = requests.post(self.base_url + path, headers=self._headers(), json=payload, timeout=15)
+                if response.status_code not in (200, 201):
+                    raise RuntimeError('Hetzner rejected ' + path)
+                action_id = response.json().get('action', {}).get('id')
+                if not action_id:
+                    raise RuntimeError('Hetzner returned no action ID')
+                self._wait_action(action_id)
             try:
-                requests.post(f"{self.base_url}/servers/{self.server_id}/actions/poweron", headers=self._headers(), timeout=15)
-            except Exception as e:
-                logger.warning(f"Notice powering on server: {e}")
+                if is_running:
+                    action(f'/servers/{self.server_id}/actions/poweroff')
+                if old_pip_id:
+                    action(f'/primary_ips/{old_pip_id}/actions/unassign')
+                action(f'/primary_ips/{new_pip_id}/actions/assign', {'server': int(self.server_id)})
+                if is_running:
+                    action(f'/servers/{self.server_id}/actions/poweron')
+            except Exception:
+                try:
+                    action(f'/primary_ips/{new_pip_id}/actions/unassign')
+                    if old_pip_id:
+                        action(f'/primary_ips/{old_pip_id}/actions/assign', {'server': int(self.server_id)})
+                    if is_running:
+                        action(f'/servers/{self.server_id}/actions/poweron')
+                    requests.delete(f'{self.base_url}/primary_ips/{new_pip_id}', headers=self._headers(), timeout=10)
+                except Exception as recovery_error:
+                    logger.critical('Hetzner compensation needs manual reconciliation: %s', recovery_error)
+                raise
 
             # Delete old primary IP
             if old_pip_id:
@@ -1156,7 +1156,11 @@ class AzureCloudProvider(BaseCloudProvider):
         if not ip_configs:
             raise ValueError(f"NIC {nic} has no IP configurations.")
 
-        primary_ip_config = ip_configs[0]
+        primary_ip_config = next((item for item in ip_configs if item.get('properties', {}).get('primary')), None)
+        if primary_ip_config is None:
+            if len(ip_configs) != 1:
+                raise RuntimeError('Cannot identify the primary NIC IP configuration')
+            primary_ip_config = ip_configs[0]
         old_pip = primary_ip_config.get('properties', {}).get('publicIPAddress', {})
         old_pip_id = old_pip.get('id') if old_pip else None
 
@@ -1195,7 +1199,22 @@ class AzureCloudProvider(BaseCloudProvider):
                     break
 
         if not new_ip:
-            new_ip = SystemMonitor().get_public_ip()
+            raise RuntimeError('Azure allocation did not return an address; old resource retained')
+        confirmed = False
+        for _ in range(30):
+            response = requests.get(nic_url, headers=headers, timeout=10)
+            response.raise_for_status()
+            properties = response.json().get('properties', {})
+            state = properties.get('provisioningState')
+            if state == 'Failed':
+                raise RuntimeError('Azure NIC binding failed; old public IP retained')
+            bound = any(item.get('properties', {}).get('publicIPAddress', {}).get('id') == new_pip_id for item in properties.get('ipConfigurations', []))
+            if state == 'Succeeded' and bound:
+                confirmed = True
+                break
+            time.sleep(2)
+        if not confirmed:
+            raise RuntimeError('Azure NIC binding not confirmed; old public IP retained')
 
         # 4. Clean up old Public IP if existed
         if old_pip_id:
@@ -1421,7 +1440,8 @@ class CloudflareDnsProvider(BaseDnsProvider):
                 raise RuntimeError(f'Failed to create A record: {c_res.get("errors")}')
             return True
 
-        record_id = res['result'][0]['id']
+        record = res['result'][0]
+        record_id = record['id']
 
         # Update A Record
         update_url = f'https://api.cloudflare.com/client/v4/zones/{zone_id}/dns_records/{record_id}'
@@ -1429,8 +1449,8 @@ class CloudflareDnsProvider(BaseDnsProvider):
             'type': 'A',
             'name': record_name,
             'content': new_ip,
-            'ttl': 60,
-            'proxied': False
+            'ttl': record.get('ttl', 60),
+            'proxied': record.get('proxied', False)
         }
         r = requests.put(update_url, headers=self.headers, json=payload, timeout=5)
         u_res = r.json()
@@ -1445,48 +1465,56 @@ class CloudflareDnsProvider(BaseDnsProvider):
 CloudflareManager = CloudflareDnsProvider
 
 
+class WebhookDnsProvider(BaseDnsProvider):
+    """Adapter for an administrator-operated HTTPS DNS update gateway."""
+    def __init__(self, cfg):
+        self.cfg = cfg
+    def update_dns_record(self, record_name='', new_ip=None):
+        import ipaddress
+        from net_policy import open_secure, read_json
+        ipaddress.ip_address(new_ip)
+        payload = json.dumps({'record_name': record_name, 'ip': new_ip}).encode()
+        import urllib.request
+        req = urllib.request.Request(self.cfg['url'], data=payload, headers={
+            'Authorization': 'Bearer ' + self.cfg.get('api_token', ''), 'Content-Type': 'application/json'})
+        with open_secure(req) as response:
+            result = read_json(response)
+        if result.get('success') is not True or result.get('ip') != new_ip:
+            raise RuntimeError('DNS gateway did not confirm the requested address')
+        return True
+
+
+def dns_settings(cfg):
+    dns = dict(cfg.get('cloudflare', {}))
+    dns.update({k: v for k, v in cfg.get('dns', {}).items() if v is not None})
+    dns.setdefault('type', 'cloudflare')
+    return dns
+
+
 def get_dns_provider(cfg: dict, zone_name: str = '') -> BaseDnsProvider:
-    """
-    Factory creating a DNS provider instance based on config.
-    Supports 'dns' configuration section, falling back to legacy 'cloudflare' config.
-    """
-    dns_cfg = cfg.get('dns', {})
-    dns_type = dns_cfg.get('type')
-    legacy_cf = cfg.get('cloudflare', {})
+    dns = dns_settings(cfg)
+    if dns['type'] == 'cloudflare':
+        return CloudflareDnsProvider(dns.get('api_token', ''), zone_name or dns.get('zone_name', ''))
+    if dns['type'] == 'webhook':
+        return WebhookDnsProvider(dns)
+    raise ValueError('Unsupported DNS provider: ' + str(dns['type']))
 
-    if not dns_type:
-        token = legacy_cf.get('api_token', '')
-        zone = zone_name or legacy_cf.get('zone_name', '')
-        return CloudflareDnsProvider(token, zone)
+def generate_rsa_keypair(key_dir=None):
+    from cryptography.hazmat.primitives.asymmetric import rsa
+    from cryptography.hazmat.primitives import serialization
+    key_dir = key_dir or OCI_DIR
+    os.makedirs(key_dir, mode=0o700, exist_ok=True)
+    key_path = os.path.join(key_dir, 'oci_api_key.pem')
+    pub_path = os.path.join(key_dir, 'oci_api_key_public.pem')
+    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    atomic_write(key_path, key.private_bytes(serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8, serialization.NoEncryption()))
+    public = key.public_key().public_bytes(serialization.Encoding.PEM, serialization.PublicFormat.SubjectPublicKeyInfo)
+    atomic_write(pub_path, public, mode=0o644)
+    return public.decode().strip(), key_path
 
-    if dns_type == 'cloudflare':
-        token = dns_cfg.get('api_token', '') or legacy_cf.get('api_token', '')
-        zone = zone_name or dns_cfg.get('zone_name', '') or legacy_cf.get('zone_name', '')
-        return CloudflareDnsProvider(token, zone)
-    else:
-        logger.warning(f"Unrecognized DNS provider type '{dns_type}', falling back to Cloudflare.")
-        token = dns_cfg.get('api_token', '') or legacy_cf.get('api_token', '')
-        zone = zone_name or dns_cfg.get('zone_name', '') or legacy_cf.get('zone_name', '')
-        return CloudflareDnsProvider(token, zone)
-
-def generate_rsa_keypair(key_dir="/root/.oci"):
-    os.makedirs(key_dir, exist_ok=True)
-    key_path = os.path.join(key_dir, "oci_api_key.pem")
-    pub_path = os.path.join(key_dir, "oci_api_key_public.pem")
-
-    res = subprocess.run(
-        f"openssl genrsa -out {key_path} 2048 && chmod 600 {key_path} && openssl rsa -pubout -in {key_path} -out {pub_path}",
-        shell=True, capture_output=True, text=True
-    )
-    if res.returncode != 0:
-        raise RuntimeError(f"OpenSSL failed: {res.stderr}")
-    
-    with open(pub_path, 'r', encoding='utf-8') as f:
-        pub_content = f.read().strip()
-    return pub_content, key_path
-
-def save_oci_config(raw_config_text, key_path, oci_dir="/root/.oci"):
-    os.makedirs(oci_dir, exist_ok=True)
+def save_oci_config(raw_config_text, key_path, oci_dir=None):
+    oci_dir = oci_dir or OCI_DIR
+    os.makedirs(oci_dir, mode=0o700, exist_ok=True)
     lines = raw_config_text.strip().splitlines()
     new_lines = []
     has_key_file = False
@@ -1501,9 +1529,7 @@ def save_oci_config(raw_config_text, key_path, oci_dir="/root/.oci"):
         new_lines.append(f"key_file={key_path}")
     
     cfg_file = os.path.join(oci_dir, "config")
-    with open(cfg_file, 'w', encoding='utf-8') as f:
-        f.write("\n".join(new_lines) + "\n")
-    os.chmod(cfg_file, 0o600)
+    atomic_write(cfg_file, '\n'.join(new_lines) + '\n')
     return cfg_file
 
 if __name__ == '__main__':

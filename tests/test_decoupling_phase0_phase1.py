@@ -58,14 +58,14 @@ class TestServiceManagerAbstraction(unittest.TestCase):
     def test_noop_service_manager(self):
         mgr = service_mgr.NoopServiceManager()
         ok_rel, msg_rel = mgr.reload('x-ui')
-        self.assertTrue(ok_rel)
-        self.assertIn('Simulated reload', msg_rel)
+        self.assertFalse(ok_rel)
+        self.assertIn('unsupported', msg_rel)
 
         ok_rst, msg_rst = mgr.restart('vpsentinel')
-        self.assertTrue(ok_rst)
-        self.assertIn('Simulated restart', msg_rst)
+        self.assertFalse(ok_rst)
+        self.assertIn('unsupported', msg_rst)
 
-        self.assertTrue(mgr.is_active('any_service'))
+        self.assertFalse(mgr.is_active('any_service'))
 
     @patch('subprocess.run')
     def test_systemd_service_manager(self, mock_run):
@@ -79,7 +79,7 @@ class TestServiceManagerAbstraction(unittest.TestCase):
         ok, msg = mgr.reload('x-ui')
         self.assertTrue(ok)
         self.assertIn('Reloading done', msg)
-        self.assertIn('systemctl reload x-ui', mock_run.call_args[0][0])
+        self.assertEqual(['systemctl', 'reload', 'x-ui'], mock_run.call_args[0][0])
 
         mock_proc.returncode = 1
         mock_proc.stdout = ''
@@ -141,10 +141,8 @@ class TestDnsProviderAbstraction(unittest.TestCase):
                 'api_token': 'fallback_token'
             }
         }
-        prov = sentinel_core.get_dns_provider(cfg, zone_name='override.com')
-        self.assertIsInstance(prov, sentinel_core.CloudflareDnsProvider)
-        self.assertEqual(prov.api_token, 'fallback_token')
-        self.assertEqual(prov.zone_name, 'override.com')
+        with self.assertRaises(ValueError):
+            sentinel_core.get_dns_provider(cfg, zone_name='override.com')
 
     @patch('requests.get')
     def test_cloudflare_provider_verify_token(self, mock_get):
@@ -197,23 +195,15 @@ class TestTelemetryContractCompatibility(unittest.TestCase):
 
 class TestR14ConfigIsolation(unittest.TestCase):
     def test_root_config_json_not_modified_by_sandbox(self):
-        real_cfg_path = os.path.join(BASE_DIR, 'config.json')
-        if not os.path.exists(real_cfg_path):
-            self.skipTest('Real config.json not present in BASE_DIR')
-
-        st_before = os.stat(real_cfg_path)
-        mtime_before = st_before.st_mtime_ns
-
-        with tempfile.TemporaryDirectory() as tmp_dir:
-            tmp_cfg = os.path.join(tmp_dir, 'config.json')
-            with patch.dict(os.environ, {'VPSENTINEL_CONFIG_PATH': tmp_cfg}):
-                sentinel_core.ConfigManager.save({'isolated_key': 'sandboxed_value'})
-                loaded = sentinel_core.ConfigManager.load()
-                self.assertEqual(loaded.get('isolated_key'), 'sandboxed_value')
-
-        st_after = os.stat(real_cfg_path)
-        mtime_after = st_after.st_mtime_ns
-        self.assertEqual(mtime_before, mtime_after)
+        with tempfile.TemporaryDirectory() as root_dir, tempfile.TemporaryDirectory() as test_dir:
+            real_cfg_path = os.path.join(root_dir, 'config.json')
+            with open(real_cfg_path, 'w') as stream:
+                stream.write('{"production_marker":"unchanged"}')
+            original = open(real_cfg_path).read()
+            with patch.dict(os.environ, {'VPSENTINEL_CONFIG_PATH': os.path.join(test_dir, 'config.json')}):
+                sentinel_core.ConfigManager.save({'test_marker': True})
+                self.assertTrue(sentinel_core.ConfigManager.load()['test_marker'])
+            self.assertEqual(open(real_cfg_path).read(), original)
 
 
 if __name__ == '__main__':

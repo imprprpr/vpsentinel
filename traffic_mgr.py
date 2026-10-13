@@ -1,3 +1,4 @@
+from secure_files import transactional
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 # ==============================================================================
@@ -342,17 +343,23 @@ class TrafficManager:
 
     @classmethod
     def start_background_collector(cls, get_config_func, interval_sec=60):
+        existing = getattr(cls, '_poller_thread', None)
+        if existing is not None and existing.is_alive():
+            return existing
+        stop_event = threading.Event()
+        cls._stop_event = stop_event
         def _loop():
             logger.info("Starting background traffic auditing worker...")
-            while True:
+            while not stop_event.is_set():
                 try:
                     cfg = get_config_func() if callable(get_config_func) else {}
                     cls.poll_and_record(notification_config=cfg)
                 except Exception as e:
                     logger.error(f"Traffic worker error: {e}")
-                time.sleep(interval_sec)
+                stop_event.wait(interval_sec)
 
         t = threading.Thread(target=_loop, name="TrafficCollectorDaemon", daemon=True)
+        cls._poller_thread = t
         t.start()
         return t
 
