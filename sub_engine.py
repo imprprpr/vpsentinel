@@ -93,15 +93,29 @@ class SubEngine:
             logger.error(f'Database {DB_PATH} not found.')
             return []
 
-        conn = sqlite3.connect(DB_PATH)
-        cursor = conn.cursor()
-        cursor.execute("PRAGMA table_info(inbounds);")
-        cols = [c[1] for c in cursor.fetchall()]
-        has_remark = 'remark' in cols
-        q = f"SELECT id, tag, port, protocol, settings, stream_settings, enable{', remark' if has_remark else ''} FROM inbounds WHERE enable = 1;"
-        cursor.execute(q)
-        rows = cursor.fetchall()
-        conn.close()
+        from pathlib import Path
+        def read_rows():
+            conn = sqlite3.connect(Path(DB_PATH).absolute().as_uri() + '?mode=ro', uri=True)
+            try:
+                cursor = conn.cursor()
+                cursor.execute("PRAGMA table_info(inbounds);")
+                cols = [c[1] for c in cursor.fetchall()]
+                has_remark = 'remark' in cols
+                q = f"SELECT id, tag, port, protocol, settings, stream_settings, enable{', remark' if has_remark else ''} FROM inbounds WHERE enable = 1;"
+                cursor.execute(q)
+                return cursor.fetchall(), has_remark
+            finally:
+                conn.close()
+        try:
+            rows, has_remark = read_rows()
+        except sqlite3.OperationalError:
+            if os.path.abspath(DB_PATH) != '/etc/x-ui/x-ui.db' or os.geteuid() == 0:
+                raise
+            from privileged_helper import request_operation
+            result = request_operation({'operation': 'xui_read_access'})
+            if not result.get('success'):
+                raise RuntimeError('Database read access unavailable')
+            rows, has_remark = read_rows()
 
         nodes = []
         domain = SubEngine.get_server_domain()

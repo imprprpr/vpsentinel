@@ -6,6 +6,7 @@ import re
 import socket
 import struct
 import subprocess
+import stat
 
 SOCKET_PATH = '/run/vpsentinel-control/control.sock'
 SERVICES = frozenset({'vpsentinel', 'x-ui', 'xray', 'nginx', 'caddy'})
@@ -26,6 +27,18 @@ def request_operation(payload):
 
 
 def dispatch(payload):
+    if payload.get('operation') == 'xui_read_access':
+        # WAL sidecars can be recreated with mode 0600 by the root-owned panel.
+        # Grant read access only to fixed regular files in its protected directory.
+        for path in ('/etc/x-ui/x-ui.db', '/etc/x-ui/x-ui.db-wal', '/etc/x-ui/x-ui.db-shm'):
+            try:
+                metadata = os.lstat(path)
+            except FileNotFoundError:
+                continue
+            if not stat.S_ISREG(metadata.st_mode):
+                raise ValueError('Invalid database file')
+            subprocess.run(['/usr/bin/setfacl', '-m', 'u:vpsentinel:r', path], check=True, capture_output=True, timeout=5)
+        return {'success': True, 'detail': 'Database read access refreshed'}
     if payload.get('operation') == 'service':
         name, action = payload.get('name'), payload.get('action')
         if name not in SERVICES or action not in ('reload', 'restart', 'is-active'):

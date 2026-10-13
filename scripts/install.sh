@@ -210,6 +210,9 @@ if [ -d /etc/x-ui ]; then
     setfacl -m u:vpsentinel:rx /etc/x-ui
     setfacl -m d:u:vpsentinel:rX /etc/x-ui
     [ ! -f /etc/x-ui/x-ui.db ] || setfacl -m u:vpsentinel:r /etc/x-ui/x-ui.db
+    for sidecar in /etc/x-ui/x-ui.db-wal /etc/x-ui/x-ui.db-shm; do
+        [ ! -f "$sidecar" ] || setfacl -m u:vpsentinel:r "$sidecar"
+    done
 fi
 systemctl restart vpsentinel-control
 systemctl restart vpsentinel
