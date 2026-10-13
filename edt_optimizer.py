@@ -257,7 +257,9 @@ class Optimizer:
                     'download_mbps': min(v['download_mbps'] for v in samples)})
             pools = edt.setdefault('clean_ips', {})
             chosen = choose(combined, pools.get(isp, []))
-            if chosen: pools[isp] = chosen
+            if chosen:
+                pools[isp] = chosen
+                opt.setdefault('verified_pools', {})[isp] = {'ips': chosen, 'timestamp': time.time(), 'fingerprint': expected}
             opt['last_completed_at'] = time.time()
         ConfigManager.update(save)
 

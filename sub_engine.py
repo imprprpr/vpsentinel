@@ -235,14 +235,9 @@ class SubEngine:
                 import time
                 from edt_optimizer import endpoints, fingerprint
                 expected = fingerprint(endpoints(edt))
-                reports = [r for r in edt['optimizer'].get('reports', {}).values() if r.get('fingerprint')==expected and time.time()-r['timestamp']<21600]
-                verified_isps = {r['isp'] for r in reports}
-                verified_ips = {}
-                for isp in verified_isps:
-                    samples = [v for r in reports if r['isp']==isp for v in r['results']]
-                    good = {v['ip'] for v in samples if v['success_rate']==1 and v.get('download_mbps',0)>0}
-                    bad = {v['ip'] for v in samples if v['success_rate']!=1 or not v.get('download_mbps')}
-                    verified_ips[isp] = good-bad
+                verified = edt['optimizer'].get('verified_pools', {})
+                verified_isps = {isp for isp, pool in verified.items() if pool.get('fingerprint')==expected and time.time()-pool['timestamp']<21600}
+                verified_ips = {isp: verified[isp]['ips'] for isp in verified_isps}
 
             nodes = []
             isp_map = [
@@ -264,7 +259,7 @@ class SubEngine:
                         continue
                     pool = clean_ips.get(isp_key, [])
                     if verified_isps is not None:
-                        pool = [ip for ip in pool if ip in verified_ips.get(isp_key,set())]
+                        pool = list(verified_ips.get(isp_key, []))
                         if not pool: continue
                     filtered = [
                         str(ip).strip() for ip in pool
