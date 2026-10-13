@@ -18,6 +18,7 @@
   #nav-user-container button { min-width: 36px; min-height: 40px; margin: 0; display: grid; place-items: center; }
   body > main.mobile-main { padding: 16px 14px 24px; }
   .mobile-main .grid > *, .mobile-main .flex > *, .modal-overlay .flex > * { min-width: 0; }
+  .mobile-main .badge { flex-shrink: 0; white-space: nowrap; }
   .mobile-main .card { padding: 16px; border-radius: 14px; }
   .mobile-main h2, .mobile-main h3 { line-height: 1.6; overflow-wrap: anywhere; }
   .mobile-main p, .mobile-main .font-mono, #edt-opt-results, #edt-source-status { overflow-wrap: anywhere; }
