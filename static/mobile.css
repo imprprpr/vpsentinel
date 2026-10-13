@@ -1,0 +1,94 @@
+/* Compact controls and persistent navigation for phones; desktop layout is retained. */
+.mobile-nav { display: none; }
+html { scroll-padding-top: 136px; }
+@media (max-width: 767px) {
+  html { -webkit-text-size-adjust: 100%; }
+  body { padding-bottom: calc(76px + env(safe-area-inset-bottom, 0px)); }
+  body.mobile-modal-open { overflow: hidden; }
+  #app-header { padding: calc(10px + env(safe-area-inset-top, 0px)) 14px 10px; }
+  #app-header > div { flex-direction: column; align-items: stretch; gap: 10px; }
+  #app-header > div > div:first-child { min-width: 0; }
+  #headerCloudInfo { max-width: calc(100vw - 80px); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #header-actions { justify-content: space-between; gap: 6px; }
+  #header-actions > button { min-height: 40px; }
+  #header-actions .btn-destructive { font-size: 12px; padding: 8px; }
+  #header-actions .btn-destructive span { display: none; }
+  #header-actions .btn-destructive::after { content: "换 IP"; }
+  #nav-user-container { min-width: 0; padding: 0 6px; min-height: 40px; }
+  #nav-username { max-width: 60px; overflow: hidden; text-overflow: ellipsis; }
+  #nav-user-container button { min-width: 36px; min-height: 40px; margin: 0; display: grid; place-items: center; }
+  body > main.mobile-main { padding: 16px 14px 24px; }
+  .mobile-main .grid > *, .mobile-main .flex > *, .modal-overlay .flex > * { min-width: 0; }
+  .mobile-main .card { padding: 16px; border-radius: 14px; }
+  .mobile-main h2, .mobile-main h3 { line-height: 1.6; overflow-wrap: anywhere; }
+  .mobile-main p, .mobile-main .font-mono, #edt-opt-results, #edt-source-status { overflow-wrap: anywhere; }
+  .mobile-main .card > .flex.items-center.justify-between { flex-wrap: wrap; align-items: flex-start; gap: 12px; }
+  .mobile-main .card > .flex.items-center.justify-between > .flex { flex-wrap: wrap; gap: 8px; }
+  .btn-neutral, .btn-primary, .btn-destructive { min-height: 44px; justify-content: center; line-height: 1.4; }
+  button, a { touch-action: manipulation; }
+  button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visible {
+    outline: 2px solid #60a5fa; outline-offset: 3px;
+  }
+  input:not([type=checkbox]):not([type=radio]):not([type=hidden]), textarea, select {
+    font-size: 16px; min-height: 44px; max-width: 100%; border-radius: 8px;
+  }
+  input[type=checkbox]:not(.sr-only), input[type=radio] { width: 18px; height: 18px; flex-shrink: 0; }
+  input.sr-only { width: 1px; height: 1px; }
+  textarea { line-height: 1.5; }
+  .mobile-main label { line-height: 1.6; }
+  #tab-rules .sub-tab { min-height: 44px; flex: 0 0 auto; white-space: nowrap; }
+  #sub-actions { display: grid; grid-template-columns: 1fr 1fr; width: 100%; }
+  #sub-url-box { min-width: 0; }
+  #edt-benchmark { display: block; width: 100%; margin-top: 6px; }
+  #edt-agent-region { flex: 1 1 120px; width: 100%; }
+  #edt-agent-list > div { flex-wrap: wrap; overflow-wrap: anywhere; }
+  #edt-agent-list span { flex: 1 1 160px; }
+  .mobile-main .overflow-x-auto { max-width: 100%; -webkit-overflow-scrolling: touch; }
+  .mobile-main table { min-width: 580px; }
+  .mobile-main pre, .mobile-main code { white-space: pre-wrap; overflow-wrap: anywhere; }
+  .mobile-nav {
+    display: grid; grid-template-columns: repeat(5, minmax(0, 1fr));
+    position: fixed; bottom: 0; left: 0; right: 0; z-index: 45;
+    padding: 7px max(8px, env(safe-area-inset-right, 0px)) calc(7px + env(safe-area-inset-bottom, 0px)) max(8px, env(safe-area-inset-left, 0px));
+    background: rgba(12, 12, 15, .97); backdrop-filter: blur(16px);
+    border-top: 1px solid #27272a; box-shadow: 0 -8px 24px rgba(0, 0, 0, .15);
+  }
+  .mobile-nav button { min-height: 52px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 4px; color: #a1a1aa; font-size: 11px; border-radius: 10px; }
+  .mobile-nav svg { width: 20px; height: 20px; }
+  .mobile-nav button[aria-current=page] { color: #93c5fd; background: #17233c; }
+  .modal-overlay { padding: 12px; align-items: center; }
+  .modal-overlay > .card {
+    margin: 0; padding: 18px; width: 100%; max-width: 100%;
+    max-height: calc(100vh - 24px); max-height: calc(100dvh - 24px - env(safe-area-inset-top, 0px) - env(safe-area-inset-bottom, 0px));
+    overflow-y: auto; overscroll-behavior: contain; border-radius: 16px;
+  }
+  .modal-overlay > .card > .flex:first-child { gap: 8px; }
+  .modal-overlay > .card button { min-height: 44px; }
+  .modal-overlay > .card > .flex:first-child > button { min-width: 44px; flex-shrink: 0; }
+  .modal-overlay .grid { grid-template-columns: minmax(0, 1fr); }
+  .modal-overlay .grid > * { grid-column: auto; }
+  #settings-modal > .card, #setup-wizard-modal > .card { display: flex; flex-direction: column; gap: 16px; overflow: hidden; }
+  #settings-modal > .card > *, #setup-wizard-modal > .card > * { margin-top: 0; }
+  #settings-modal > .card > .overflow-y-auto, #setup-wizard-modal > .card > .overflow-y-auto { min-height: 0; max-height: none; flex: 1 1 auto; overflow-y: auto; padding-right: 2px; }
+  #settings-modal > .card > .flex:last-child { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+  #settings-modal > .card > .flex:last-child > button { grid-column: 1 / -1; }
+  #settings-modal > .card > .flex:last-child > div { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; grid-column: 1 / -1; }
+  #wiz-footer-adv:not(.hidden), #wiz-footer-quick:not(.hidden), #wiz-footer-success:not(.hidden) { gap: 8px; flex-wrap: wrap; }
+  #wiz-footer-adv > div { flex: 1 1 200px; flex-wrap: wrap; justify-content: flex-end; }
+  #wiz-footer-quick button:last-child { flex: 1; }
+  #setup-wizard-modal h2 { font-size: 13px; line-height: 1.5; }
+  #wiz-tab-quick, #wiz-tab-adv { padding: 8px; font-size: 12px; }
+  #yaml-modal pre { white-space: pre; overflow-x: auto; font-size: 12px; }
+  #tab-transits > .flex, #tab-mesh > .flex { flex-wrap: wrap; gap: 12px; }
+  #edt-agent-region { max-width: 100%; }
+  .edt-probe-controls { flex-wrap: wrap; }
+}
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { scroll-behavior: auto !important; transition-duration: 0s !important; animation-duration: 0s !important; }
+}
+
+@media (max-width: 360px) {
+  #header-actions { gap: 4px; }
+  #nav-username { max-width: 32px; }
+  #nav-user-container { font-size: 11px; padding: 0 4px; }
+}

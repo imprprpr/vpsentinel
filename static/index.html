@@ -3,7 +3,7 @@
 <head>
   <script src="/static/vendor/purify.min.js"></script>
   <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
   <title>VPSentinel 控制中枢</title>
   <script src="/static/tailwindcss.min.js"></script>
   <style>
@@ -154,11 +154,12 @@
       pointer-events: auto !important;
     }
   </style>
+  <link rel="stylesheet" href="/static/mobile.css?v=1">
 </head>
 <body class="min-h-screen flex flex-col">
 
   <!-- Top Navigation Bar -->
-  <header class="border-b border-[#27272a] bg-[#0c0c0e] px-6 py-3.5 sticky top-0 z-40">
+  <header id="app-header" class="border-b border-[#27272a] bg-[#0c0c0e] px-6 py-3.5 sticky top-0 z-40">
     <div class="max-w-7xl mx-auto flex items-center justify-between">
       <div class="flex items-center gap-6">
         <div class="flex items-center gap-2.5">
@@ -268,19 +269,19 @@
         </nav>
       </div>
 
-      <div class="flex items-center gap-3">
+      <div id="header-actions" class="flex items-center gap-3">
         <div class="badge bg-emerald-950/70 border border-emerald-600/30 text-emerald-400 font-mono text-[11px]" id="status-pill">
           <span class="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse"></span>
           <span id="status-text">HEALTHY</span>
         </div>
-        <div class="hidden sm:flex items-center gap-1.5 text-xs text-zinc-300 font-mono bg-zinc-900/80 border border-zinc-800 rounded px-2.5 py-1" id="nav-user-container">
+        <div class="flex items-center gap-1.5 text-xs text-zinc-300 font-mono bg-zinc-900/80 border border-zinc-800 rounded px-2.5 py-1" id="nav-user-container">
           <span class="w-1.5 h-1.5 rounded-full bg-emerald-400"></span>
           <span id="nav-username">admin</span>
           <button onclick="handleLogout()" title="安全登出" class="ml-1 text-zinc-500 hover:text-rose-400 transition-colors">
             <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1"></path></svg>
           </button>
         </div>
-        <button class="btn-destructive" onclick="triggerRebirth()">
+        <button class="btn-destructive" aria-label="触发换 IP 自愈" onclick="triggerRebirth()">
           <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"></path></svg>
           <span>触发换 IP 自愈</span>
         </button>
@@ -292,7 +293,7 @@
   </header>
 
   <!-- Main Container -->
-  <main class="flex-1 max-w-7xl w-full mx-auto p-6 space-y-6">
+  <main class="mobile-main flex-1 max-w-7xl w-full mx-auto p-6 space-y-6">
 
     <!-- TAB 1: OVERVIEW -->
     <div id="tab-overview" class="space-y-6">
@@ -652,7 +653,7 @@
           </div>
           <div class="flex items-center gap-3">
             <button class="btn-neutral text-xs" onclick="refreshCleanIPs()" id="btn-refresh-clean-ips">
-              <span>刷新三网优选 IP</span>
+              <span>刷新优选节点</span>
             </button>
             <button class="btn-primary text-xs" onclick="saveEdtConfig()">保存 EdgeTunnel 配置</button>
           </div>
@@ -723,7 +724,7 @@
           <p id="edt-opt-status" class="text-blue-300">尚未开始实测</p>
           <div id="edt-opt-results" class="text-zinc-400 whitespace-pre-wrap"></div>
           <div class="bg-zinc-900 p-3 rounded"><strong>服务器侧优选</strong><div id="edt-anycast-ips" class="font-mono mt-2"></div></div>
-          <div class="flex gap-2"><select id="edt-agent-isp" class="bg-zinc-900 p-2"><option value="telecom">电信</option><option value="unicom">联通</option><option value="mobile">移动</option></select>
+          <div class="edt-probe-controls flex gap-2"><select id="edt-agent-isp" class="bg-zinc-900 p-2"><option value="telecom">电信</option><option value="unicom">联通</option><option value="mobile">移动</option></select>
           <input id="edt-agent-region" placeholder="探测设备所在地区" maxlength="64" class="bg-zinc-900 p-2">
           <button class="btn-neutral" onclick="registerEdtProbe()">登记探测设备</button></div>
           <p class="text-zinc-500">创建后保存专用凭据，在该线路设备运行探测程序。凭据只允许领取探测任务、提交结果，不具有管理权限。</p>
@@ -1578,6 +1579,15 @@
     </div>
 
   </main>
+
+
+  <nav class="mobile-nav" aria-label="手机主导航">
+    <button type="button" data-mobile-tab="overview" aria-label="概览" onclick="switchTab('overview'); window.scrollTo({top:0,behavior:'auto'})"><svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3h7v7H3zM14 3h7v7h-7zM3 14h7v7H3zM14 14h7v7h-7z"/></svg><span>概览</span></button>
+    <button type="button" data-mobile-tab="rules" aria-label="订阅" onclick="switchTab('rules'); window.scrollTo({top:0,behavior:'auto'})"><svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M4 4h16v16H4zM8 8h8M8 12h8M8 16h5"/></svg><span>订阅</span></button>
+    <button type="button" data-mobile-tab="transits" aria-label="节点" onclick="switchTab('transits'); window.scrollTo({top:0,behavior:'auto'})"><svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M8 7h12m-4-4 4 4-4 4M16 17H4m4-4-4 4 4 4"/></svg><span>节点</span></button>
+    <button type="button" data-mobile-tab="mesh" aria-label="集群" onclick="switchTab('mesh'); window.scrollTo({top:0,behavior:'auto'})"><svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M4 3h16v5H4zM4 11h16v5H4zM4 19h16v2H4z"/></svg><span>集群</span></button>
+    <button type="button" data-mobile-tab="services" aria-label="服务" onclick="switchTab('services'); window.scrollTo({top:0,behavior:'auto'})"><svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v3m0 12v3M3 12h3m12 0h3M6 6l2 2m8 8 2 2M6 18l2-2M16 8l2-2M12 8a4 4 0 1 0 0 8 4 4 0 0 0 0-8"/></svg><span>服务</span></button>
+  </nav>
 
   <!-- Settings Modal -->
   <div class="modal-overlay" id="settings-modal">
@@ -2647,6 +2657,11 @@
 
     // Tab switching
     function switchTab(tabId) {
+      if (!['overview', 'rules', 'transits', 'services', 'mesh'].includes(tabId)) tabId = 'overview';
+      document.querySelectorAll('[data-mobile-tab]').forEach(button => {
+        if (button.dataset.mobileTab === tabId) button.setAttribute('aria-current', 'page');
+        else button.removeAttribute('aria-current');
+      });
       ['overview', 'rules', 'transits', 'services', 'mesh'].forEach(t => {
         const el = document.getElementById(`tab-${t}`);
         if (el) el.classList.add('hidden');
@@ -5682,5 +5697,6 @@
       if (tCmd) tCmd.innerText = `curl -fsSL ${window.location.origin}/scripts/setup-relay.sh | sudo bash`;
     });
   </script>
+  <script src="/static/mobile.js?v=1"></script>
 </body>
 </html>
