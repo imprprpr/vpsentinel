@@ -48,3 +48,9 @@ export VPSENTINEL_PROBE_TOKEN
 - https://bestcf.pages.dev/vvhan/ipv4.txt
 
 来源成功结果缓存 30 分钟，获取失败时最多沿用 6 小时内的缓存；状态接口显示来源错误和缓存回退。各来源在运营商分类中交错排列，每轮从手动地址、原池、三网分类、未分类地址和官方网段采样中轮流选取最多 24 个。每类游标持久化，后续轮次继续覆盖候选池。来源标签不作为三网实测证明；候选仅经过完整端点验证后才下发。
+
+## 下载验证目标与误判
+
+原 Cloudflare 下载目标保留兼容。部分端点能代理普通站点，但访问 Cloudflare 自身站点会失败；该结果不能据此判定所有代理请求都不可用。可在页面选择 Wikimedia：通过 `upload.wikimedia.org` 的 HTTPS 范围请求获取指定文件的前 64 KiB，必须返回 206、正确的 Content-Range 和完整数据。不会下载完整 14 MB 文件。文件来源：https://commons.wikimedia.org/wiki/File:Fronalpstock_big.jpg 。
+
+两个目标均验证目标站点 TLS；结果仅证明该验证目标上的代理下载能力，不保证所有网站都能访问。更换验证目标会改变实测指纹，旧结果须重新检测。三网探测设备须使用同版本程序，以支持新的验证目标。

@@ -1259,6 +1259,7 @@ def get_edt_config(request: Request):
             'worker_uuid': edt.get('worker_uuid', ''),
             'path': edt.get('path', '/?ed=2048'),
             'proxy_ip': edt.get('proxy_ip', ''),
+            'benchmark': edt.get('benchmark', 'cloudflare'),
             'clean_ips': clean_ips,
             'auto_refresh_clean_ips': bool(edt.get('auto_refresh_clean_ips', True)),
             'enable_fallback_group': bool(edt.get('enable_fallback_group', True)),
@@ -1275,13 +1276,15 @@ def save_edt_config(data: dict, request: Request):
     from edt_optimizer import validate_candidate, endpoints
     from validation import https_url
     proposed = dict(cfg_mgr.load().get('edgetunnel', {}))
-    proposed.update({k: data[k] for k in ('enabled', 'pages_domain', 'worker_domain', 'uuid', 'pages_uuid', 'worker_uuid', 'path', 'proxy_ip') if k in data})
+    proposed.update({k: data[k] for k in ('enabled', 'pages_domain', 'worker_domain', 'uuid', 'pages_uuid', 'worker_uuid', 'path', 'proxy_ip', 'benchmark') if k in data})
     try:
         for name in ('pages_domain', 'worker_domain'):
             if name in data:
                 if not isinstance(data[name], str):
                     raise ValueError('Endpoint domains must be strings')
                 proposed[name] = clean_ip_mgr.sanitize_domain(data[name])
+        if proposed.get('benchmark', 'cloudflare') not in ('cloudflare', 'wikimedia'):
+            raise ValueError('Unsupported benchmark target')
         if proposed.get('enabled'): endpoints(proposed)
         candidates = [validate_candidate(v) for v in data.get('candidates', [])]
         sources = [https_url(v) for v in data.get('sources', [])]
@@ -1298,7 +1301,7 @@ def save_edt_config(data: dict, request: Request):
     opt = edt.setdefault('optimizer', {})
     for key, value in (('candidates', candidates), ('sources', sources), ('interval_sec', interval)):
         if key in data: opt[key] = value
-    for k in ('enabled', 'pages_domain', 'worker_domain', 'uuid', 'pages_uuid', 'worker_uuid', 'path', 'proxy_ip', 'auto_refresh_clean_ips', 'enable_fallback_group'):
+    for k in ('enabled', 'pages_domain', 'worker_domain', 'uuid', 'pages_uuid', 'worker_uuid', 'path', 'proxy_ip', 'benchmark', 'auto_refresh_clean_ips', 'enable_fallback_group'):
         if k in data:
             val = data[k]
             if k in ('pages_domain', 'worker_domain') and isinstance(val, str):

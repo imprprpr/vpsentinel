@@ -716,6 +716,7 @@
           <textarea id="edt-candidates" class="w-full bg-zinc-900 p-2 rounded" rows="3"></textarea>
           <label class="block">可信候选来源（每行一个 HTTPS 文本地址，最多 3 个；支持 IPv4 或 IP:443#备注；外部运营商标签仅为候选分类）</label>
           <textarea id="edt-sources" class="w-full bg-zinc-900 p-2 rounded" rows="2"></textarea>
+          <label>下载验证目标 <select id="edt-benchmark" class="bg-zinc-900 p-2"><option value="cloudflare">Cloudflare（端点须能访问 Cloudflare 站点）</option><option value="wikimedia">Wikimedia（当前线路推荐）</option></select></label>
           <label><input type="checkbox" id="edt-auto-refresh"> 定时自动检测</label>
           <label>间隔（分钟） <input id="edt-interval" type="number" min="15" max="1440" value="60" class="bg-zinc-900 p-2 w-24"></label>
           <p id="edt-source-status" class="text-zinc-400 whitespace-pre-wrap"></p>
@@ -2845,6 +2846,7 @@
         document.getElementById('edt-candidates').value=(edt.candidates||[]).join('\n');
         document.getElementById('edt-sources').value=(edt.sources||[]).join('\n');
         document.getElementById('edt-auto-refresh').checked=edt.auto_refresh_clean_ips;
+        document.getElementById('edt-benchmark').value=edt.benchmark||'cloudflare';
         document.getElementById('edt-interval').value=(edt.interval_sec||3600)/60;
         pollEdtOptimizer();
       } catch (e) {
@@ -2893,6 +2895,7 @@
         candidates: document.getElementById('edt-candidates').value.split(/\s+/).filter(Boolean),
         sources: document.getElementById('edt-sources').value.split(/\s+/).filter(Boolean),
         auto_refresh_clean_ips: document.getElementById('edt-auto-refresh').checked,
+        benchmark: document.getElementById('edt-benchmark').value,
         interval_sec: Number(document.getElementById('edt-interval').value)*60
       };
       try {

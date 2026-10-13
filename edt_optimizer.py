@@ -36,6 +36,9 @@ def validate_candidate(value):
 def endpoints(edt):
     from validation import host as validate_host
     found = []
+    benchmark = edt.get('benchmark', 'cloudflare')
+    if benchmark not in ('cloudflare', 'wikimedia'):
+        raise ValueError('Unsupported benchmark target')
     for kind in ('pages', 'worker'):
         host = edt.get(kind + '_domain', '').strip()
         key = edt.get(kind + '_uuid', '').strip() or edt.get('uuid', '').strip()
@@ -52,7 +55,9 @@ def endpoints(edt):
                 path = '/proxyip=' + proxy_ip
             if not path.startswith('/') or path.startswith('//') or len(path) > 512 or any(c in path for c in '\r\n#'):
                 raise ValueError('Invalid WebSocket path')
-            found.append({'host': host, 'uuid': key, 'path': path})
+            endpoint = {'host': host, 'uuid': key, 'path': path}
+            if benchmark != 'cloudflare': endpoint['benchmark'] = benchmark
+            found.append(endpoint)
     if not found: raise ValueError('Configure a deployed Pages or Worker endpoint and UUID first')
     return found
 
@@ -74,7 +79,8 @@ async def measure_endpoint(ip, endpoint):
             host=validate_candidate(ip), port=443, server_hostname=endpoint['host'],
             ssl=ssl.create_default_context(), proxy=None, compression=None, max_size=1048576,
             open_timeout=7, close_timeout=1) as ws:
-        target = b'speed.cloudflare.com'
+        ranged = endpoint.get('benchmark') == 'wikimedia'
+        target = b'upload.wikimedia.org' if ranged else b'speed.cloudflare.com'
         header = b'\x00' + uuid.UUID(endpoint['uuid']).bytes + b'\x00\x01\x01\xbb\x02' + bytes([len(target)]) + target
         await ws.send(header)
         incoming, outgoing = ssl.MemoryBIO(), ssl.MemoryBIO()
@@ -100,7 +106,11 @@ async def measure_endpoint(ip, endpoint):
             try: tls.do_handshake(); await flush(); break
             except ssl.SSLWantReadError: await flush(); await receive()
         latency = (time.perf_counter() - started) * 1000
-        request = b'GET /__down?bytes=65536 HTTP/1.1\r\nHost: speed.cloudflare.com\r\nConnection: close\r\nAccept-Encoding: identity\r\n\r\n'
+        path = b'/wikipedia/commons/3/3f/Fronalpstock_big.jpg' if ranged else b'/__down?bytes=65536'
+        request = (b'GET ' + path + b' HTTP/1.1\r\nHost: ' + target +
+                   b'\r\nConnection: close\r\nAccept-Encoding: identity\r\n' +
+                   b'User-Agent: VPSentinel/EDTOptimizer (https://github.com/imprprpr/vpsentinel)\r\n' +
+                   (b'Range: bytes=0-65535\r\n' if ranged else b'') + b'\r\n')
         tls.write(request); await flush(); download_start = time.perf_counter()
         data = bytearray()
         while len(data) <= 131072:
@@ -111,7 +121,14 @@ async def measure_endpoint(ip, endpoint):
             except ssl.SSLWantReadError: await receive(); continue
             if b'\r\n\r\n' in data:
                 headers, body = bytes(data).split(b'\r\n\r\n', 1)
-                if not headers.startswith(b'HTTP/1.1 200'): raise ValueError('Download did not return HTTP 200')
+                status = headers.split(b'\r\n', 1)[0].split()
+                expected_status = b'206' if ranged else b'200'
+                if len(status) < 2 or status[1] != expected_status:
+                    raise ValueError('Unexpected download HTTP status')
+                if ranged:
+                    ranges = [line.split(b':', 1)[1].strip() for line in headers.split(b'\r\n')[1:] if line.lower().startswith(b'content-range:')]
+                    if len(ranges) != 1 or not re.fullmatch(rb'bytes 0-65535/[0-9]+', ranges[0]):
+                        raise ValueError('Unexpected download range')
                 lengths = [line.split(b':',1)[1].strip() for line in headers.split(b'\r\n')[1:] if line.lower().startswith(b'content-length:')]
                 chunked = any(line.lower().strip()==b'transfer-encoding: chunked' for line in headers.split(b'\r\n'))
                 size = 0
