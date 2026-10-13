@@ -1,8 +1,7 @@
 /* Compact controls and persistent navigation for phones; desktop layout is retained. */
 .mobile-nav { display: none; }
-html { scroll-padding-top: 136px; }
 @media (max-width: 767px) {
-  html { -webkit-text-size-adjust: 100%; }
+  html { -webkit-text-size-adjust: 100%; scroll-padding-top: 136px; }
   body { padding-bottom: calc(76px + env(safe-area-inset-bottom, 0px)); }
   body.mobile-modal-open { overflow: hidden; }
   #app-header { padding: calc(10px + env(safe-area-inset-top, 0px)) 14px 10px; }
@@ -36,6 +35,7 @@ html { scroll-padding-top: 136px; }
   input.sr-only { width: 1px; height: 1px; }
   textarea { line-height: 1.5; }
   .mobile-main label { line-height: 1.6; }
+  #sub-format-tabs { flex-wrap: nowrap; overflow-x: auto; max-width: 100%; -webkit-overflow-scrolling: touch; }
   #tab-rules .sub-tab { min-height: 44px; flex: 0 0 auto; white-space: nowrap; }
   #sub-actions { display: grid; grid-template-columns: 1fr 1fr; width: 100%; }
   #sub-url-box { min-width: 0; }

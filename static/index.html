@@ -544,7 +544,7 @@
       <!-- Sub URL Card -->
       <div class="card p-5 space-y-4">
         <!-- Platform Switcher Tabs -->
-        <div class="flex flex-wrap items-center gap-1.5 p-1 bg-[#161619] border border-zinc-800 rounded-lg text-xs font-medium">
+        <div id="sub-format-tabs" role="group" aria-label="订阅客户端格式" class="flex flex-wrap items-center gap-1.5 p-1 bg-[#161619] border border-zinc-800 rounded-lg text-xs font-medium">
           <button class="sub-tab px-3 py-1.5 rounded transition-all bg-zinc-800 text-white shadow-sm" onclick="switchSubTab('clash')">Clash / Mihomo</button>
           <button class="sub-tab px-3 py-1.5 rounded transition-all text-zinc-400 hover:text-white" onclick="switchSubTab('v2ray')">v2rayN / v2rayNG (Base64)</button>
           <button class="sub-tab px-3 py-1.5 rounded transition-all text-zinc-400 hover:text-white" onclick="switchSubTab('singbox')">Sing-box (JSON)</button>
@@ -560,7 +560,7 @@
             <button class="btn-neutral" onclick="previewSub()">预览配置</button>
             <button class="btn-primary" id="btn-import-client" onclick="importToClient()">
               <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"></path></svg>
-              <span id="import-btn-text">一键导入 Clash Verge</span>
+              <span id="import-btn-text">导入 Clash 客户端</span>
             </button>
           </div>
         </div>
@@ -2740,7 +2740,7 @@
         titleEl.innerText = 'Clash / Mihomo 高级智能订阅';
         descEl.innerText = '原生根据下方规则开关实时动态编译，包含智能分流与自动测速策略组';
         urlBox.innerText = `${origin}/sub/clash${tokenQuery}`;
-        importBtnText.innerText = '一键导入 Clash Verge';
+        importBtnText.innerText = '导入 Clash 客户端';
         importBtn.style.display = 'inline-flex';
       } else if (fmt === 'v2ray') {
         titleEl.innerText = 'v2rayN / 通用 Base64 订阅';
