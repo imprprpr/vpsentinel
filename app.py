@@ -11,6 +11,7 @@ import asyncio
 import logging
 import threading
 import hmac
+import hashlib
 import secrets
 import ipaddress
 from typing import List, Optional, Any, Literal
@@ -316,6 +317,8 @@ def create_managed_task(coro):
 
 @app.on_event('shutdown')
 async def shutdown_event():
+    from edt_optimizer import Optimizer
+    Optimizer.stop.set()
     for owner in (traffic_mgr.TrafficManager, mesh_mgr.MeshManager, cert_sync_mgr.CertSyncManager):
         event = getattr(owner, '_stop_event', None)
         if event: event.set()
@@ -330,6 +333,8 @@ async def shutdown_event():
 
 @app.on_event('startup')
 async def startup_event():
+    from edt_optimizer import Optimizer
+    Optimizer.start_scheduler()
     create_managed_task(background_monitor_loop())
     traffic_mgr.TrafficManager.start_background_collector(cfg_mgr.load, interval_sec=60)
     mesh_mgr.MeshManager.start_background_poller(interval_sec=60)
@@ -1256,18 +1261,38 @@ def get_edt_config(request: Request):
             'proxy_ip': edt.get('proxy_ip', ''),
             'clean_ips': clean_ips,
             'auto_refresh_clean_ips': bool(edt.get('auto_refresh_clean_ips', True)),
-            'enable_fallback_group': bool(edt.get('enable_fallback_group', True))
+            'enable_fallback_group': bool(edt.get('enable_fallback_group', True)),
+            'candidates': edt.get('optimizer', {}).get('candidates', []),
+            'sources': edt.get('optimizer', {}).get('sources', []),
+            'interval_sec': edt.get('optimizer', {}).get('interval_sec', 3600)
         }
     }
 
 @app.post('/api/edt/config')
+@transactional
 def save_edt_config(data: dict, request: Request):
     check_admin(request)
+    from edt_optimizer import validate_candidate, endpoints
+    from validation import https_url
+    proposed = dict(cfg_mgr.load().get('edgetunnel', {}))
+    proposed.update({k: data[k] for k in ('enabled', 'pages_domain', 'worker_domain', 'uuid', 'pages_uuid', 'worker_uuid', 'path', 'proxy_ip') if k in data})
+    try:
+        if proposed.get('enabled'): endpoints(proposed)
+        candidates = [validate_candidate(v) for v in data.get('candidates', [])]
+        sources = [https_url(v) for v in data.get('sources', [])]
+        if len(candidates) > 24 or len(sources) > 3: raise ValueError('At most 24 candidates and 3 sources')
+        interval = int(data.get('interval_sec', 3600))
+        if not 900 <= interval <= 86400: raise ValueError('Refresh interval must be 900–86400 seconds')
+    except (ValueError, TypeError) as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
     cfg = cfg_mgr.load()
     if 'edgetunnel' not in cfg:
         cfg['edgetunnel'] = {}
 
     edt = cfg['edgetunnel']
+    opt = edt.setdefault('optimizer', {})
+    for key, value in (('candidates', candidates), ('sources', sources), ('interval_sec', interval)):
+        if key in data: opt[key] = value
     for k in ('enabled', 'pages_domain', 'worker_domain', 'uuid', 'pages_uuid', 'worker_uuid', 'path', 'proxy_ip', 'auto_refresh_clean_ips', 'enable_fallback_group'):
         if k in data:
             val = data[k]
@@ -1275,10 +1300,9 @@ def save_edt_config(data: dict, request: Request):
                 val = clean_ip_mgr.sanitize_domain(val)
             edt[k] = val
 
+    cfg_mgr.save(cfg)
     if 'clean_ips' in data and isinstance(data['clean_ips'], dict):
         clean_ip_mgr.CleanIPManager.save_clean_ips(data['clean_ips'])
-    else:
-        cfg_mgr.save(cfg)
 
     log_event('EdgeTunnel configuration updated.')
     return {'status': 'ok', 'message': 'EdgeTunnel configuration saved successfully'}
@@ -1287,12 +1311,100 @@ def save_edt_config(data: dict, request: Request):
 def refresh_edt_clean_ips(request: Request):
     check_admin(request)
     try:
-        updated = clean_ip_mgr.CleanIPManager.refresh_clean_ips(active_test=False)
-        log_event('Refreshed EdgeTunnel Clean IP pools.')
-        return {'status': 'ok', 'clean_ips': updated}
-    except Exception as e:
-        logger.error(f'Failed to refresh clean IPs: {e}')
-        raise HTTPException(status_code=500, detail=str(e))
+        from edt_optimizer import Optimizer
+        started = Optimizer.start()
+        return {'status': 'started' if started else 'running', 'optimizer': Optimizer.status()}
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e))
+
+@app.get('/api/edt/optimizer')
+def edt_optimizer_status(request: Request):
+    check_admin(request)
+    from edt_optimizer import Optimizer
+    return Optimizer.status()
+
+class EdtAgentRegistration(BaseModel):
+    isp: Literal['telecom', 'unicom', 'mobile']
+    region: str = Field(min_length=1, max_length=64)
+
+@app.post('/api/edt/agents')
+def register_edt_agent(data: EdtAgentRegistration, request: Request):
+    check_admin(request)
+    token = secrets.token_urlsafe(32)
+    agent = {'id': secrets.token_hex(8), 'isp': data.isp, 'region': data.region,
+             'token_hash': hashlib.sha256(token.encode()).hexdigest()}
+    def save(cfg):
+        agents = cfg.setdefault('edgetunnel', {}).setdefault('optimizer', {}).setdefault('agents', [])
+        if len(agents) >= 12: raise ValueError('At most 12 probes')
+        agents.append(agent)
+    try: cfg_mgr.update(save)
+    except ValueError as exc: raise HTTPException(status_code=422, detail=str(exc))
+    return {'id': agent['id'], 'token': token}
+
+@app.delete('/api/edt/agents/{agent_id}')
+def revoke_edt_agent(agent_id: str, request: Request):
+    check_admin(request)
+    def remove(cfg):
+        opt = cfg.setdefault('edgetunnel', {}).setdefault('optimizer', {})
+        opt['agents'] = [a for a in opt.get('agents', []) if a['id'] != agent_id]
+        opt.get('reports', {}).pop(agent_id, None)
+        opt.get('tasks', {}).pop(agent_id, None)
+    cfg_mgr.update(remove)
+    return {'status': 'ok'}
+
+def check_edt_agent(request):
+    from edt_optimizer import authenticate_agent
+    token = request.headers.get('authorization', '').removeprefix('Bearer ')
+    if len(token) > 128: raise HTTPException(status_code=401, detail='Invalid probe credential')
+    try: return authenticate_agent(token)
+    except ValueError: raise HTTPException(status_code=401, detail='Invalid probe credential')
+
+@app.get('/api/edt/probe/task')
+@transactional
+def get_edt_probe_task(request: Request):
+    agent = check_edt_agent(request)
+    from edt_optimizer import Optimizer
+    opt = cfg_mgr.load().get('edgetunnel', {}).get('optimizer', {})
+    old = opt.get('tasks', {}).get(agent['id'])
+    if old and old['expires_at'] > time.time():
+        if old.get('reported'): raise HTTPException(status_code=409, detail='Next task available after current task expires')
+        return old
+    try: task = Optimizer.task()
+    except ValueError as exc: raise HTTPException(status_code=422, detail=str(exc))
+    def save(cfg):
+        current = cfg.setdefault('edgetunnel', {}).setdefault('optimizer', {})
+        if not any(a['id'] == agent['id'] for a in current.get('agents', [])):
+            raise HTTPException(status_code=401, detail='Probe revoked')
+        current.setdefault('tasks', {})[agent['id']] = task
+    cfg_mgr.update(save)
+    return task
+
+class EdtProbeRow(BaseModel):
+    ip: str = Field(max_length=45)
+    success_rate: float = Field(ge=0, le=1, allow_inf_nan=False)
+    latency_ms: Optional[float] = Field(default=None, ge=0, le=120000, allow_inf_nan=False)
+    jitter_ms: Optional[float] = Field(default=None, ge=0, le=120000, allow_inf_nan=False)
+    download_mbps: Optional[float] = Field(default=None, ge=0, le=100000, allow_inf_nan=False)
+
+class EdtProbeReport(BaseModel):
+    task_id: str = Field(max_length=64)
+    results: List[EdtProbeRow] = Field(min_length=1, max_length=24)
+
+@app.post('/api/edt/probe/report')
+def report_edt_probe(data: EdtProbeReport, request: Request):
+    agent = check_edt_agent(request)
+    from edt_optimizer import Optimizer
+    task = cfg_mgr.load().get('edgetunnel', {}).get('optimizer', {}).get('tasks', {}).get(agent['id'])
+    if not task or task['id'] != data.task_id or task['expires_at'] < time.time():
+        raise HTTPException(status_code=409, detail='Task expired; request a new task')
+    rows = [r.model_dump() for r in data.results]
+    if len({r['ip'] for r in rows}) != len(rows) or {r['ip'] for r in rows} != set(task['candidates']):
+        raise HTTPException(status_code=422, detail='Report must cover each task candidate exactly once')
+    if any(r['success_rate'] > 0 and any(r[k] is None for k in ('latency_ms','jitter_ms','download_mbps')) for r in rows):
+        raise HTTPException(status_code=422, detail='Successful measurements need latency, jitter and throughput')
+    try: Optimizer.store(rows, agent['isp'], task['fingerprint'], agent['id'], data.task_id)
+    except ValueError as exc: raise HTTPException(status_code=409, detail=str(exc))
+    return {'status': 'ok'}
 
 @app.get('/api/edt/status')
 def get_edt_status(request: Request):

@@ -230,13 +230,26 @@ class SubEngine:
             if proxy_ip and 'proxyip=' not in path:
                 path = f"/proxyip={proxy_ip}"
             clean_ips = CleanIPManager.get_clean_ips()
+            verified_isps = None
+            if edt.get('optimizer'):
+                import time
+                from edt_optimizer import endpoints, fingerprint
+                expected = fingerprint(endpoints(edt))
+                reports = [r for r in edt['optimizer'].get('reports', {}).values() if r.get('fingerprint')==expected and time.time()-r['timestamp']<21600]
+                verified_isps = {r['isp'] for r in reports}
+                verified_ips = {}
+                for isp in verified_isps:
+                    samples = [v for r in reports if r['isp']==isp for v in r['results']]
+                    good = {v['ip'] for v in samples if v['success_rate']==1 and v.get('download_mbps',0)>0}
+                    bad = {v['ip'] for v in samples if v['success_rate']!=1 or not v.get('download_mbps')}
+                    verified_ips[isp] = good-bad
 
             nodes = []
             isp_map = [
                 ('telecom', '电信优选'),
                 ('unicom', '联通优选'),
                 ('mobile', '移动优选'),
-                ('anycast', 'Anycast优选')
+                ('anycast', '服务器侧优选')
             ]
 
             endpoints = []
@@ -247,7 +260,12 @@ class SubEngine:
 
             for ep_type, ep_domain, ep_uuid in endpoints:
                 for isp_key, isp_title in isp_map:
+                    if verified_isps is not None and isp_key not in verified_isps:
+                        continue
                     pool = clean_ips.get(isp_key, [])
+                    if verified_isps is not None:
+                        pool = [ip for ip in pool if ip in verified_ips.get(isp_key,set())]
+                        if not pool: continue
                     filtered = [
                         str(ip).strip() for ip in pool
                         if str(ip).strip() and 'v6.rocks' not in str(ip).lower() and str(ip).lower() != 'cloudflare.com'

@@ -648,7 +648,7 @@
               <h3 class="text-sm font-semibold text-white">EdgeTunnel (edt) 边缘与三网优选调度中枢</h3>
               <span id="edt-status-badge" class="badge bg-zinc-800 text-zinc-400 text-[10px] font-mono">未启用</span>
             </div>
-            <p class="text-xs text-zinc-400 mt-0.5">融合 Cloudflare Pages / Workers VLESS-WS 端点，自动注入电信、联通、移动 Anycast 优选 IP，且策略组与原生节点严格物理隔离</p>
+            <p class="text-xs text-zinc-400 mt-0.5">融合 Cloudflare Pages / Workers VLESS-WS 端点，按实际探测结果生成边缘订阅；服务器侧与电信、联通、移动实测结果分别显示</p>
           </div>
           <div class="flex items-center gap-3">
             <button class="btn-neutral text-xs" onclick="refreshCleanIPs()" id="btn-refresh-clean-ips">
@@ -710,9 +710,26 @@
           </div>
         </div>
 
+        <div class="space-y-3 border-t border-zinc-800 pt-4 text-xs">
+          <p class="text-zinc-400">检测完整 VLESS 连接和 64 KiB HTTPS 下载。服务器侧测速不代表国内三网；三网探测设备需运行在对应运营商网络，线路与地区由管理员登记。</p>
+          <label class="block">候选 Cloudflare IPv4（每行一个，最多 24 个；留空则从官方网段采样）</label>
+          <textarea id="edt-candidates" class="w-full bg-zinc-900 p-2 rounded" rows="3"></textarea>
+          <label class="block">可信候选来源（每行一个 HTTPS 文本地址，最多 3 个；内容为 IPv4 列表）</label>
+          <textarea id="edt-sources" class="w-full bg-zinc-900 p-2 rounded" rows="2"></textarea>
+          <label><input type="checkbox" id="edt-auto-refresh"> 定时自动检测</label>
+          <label>间隔（分钟） <input id="edt-interval" type="number" min="15" max="1440" value="60" class="bg-zinc-900 p-2 w-24"></label>
+          <p id="edt-opt-status" class="text-blue-300">尚未开始实测</p>
+          <div id="edt-opt-results" class="text-zinc-400 whitespace-pre-wrap"></div>
+          <div class="bg-zinc-900 p-3 rounded"><strong>服务器侧优选</strong><div id="edt-anycast-ips" class="font-mono mt-2"></div></div>
+          <div class="flex gap-2"><select id="edt-agent-isp" class="bg-zinc-900 p-2"><option value="telecom">电信</option><option value="unicom">联通</option><option value="mobile">移动</option></select>
+          <input id="edt-agent-region" placeholder="探测设备所在地区" maxlength="64" class="bg-zinc-900 p-2">
+          <button class="btn-neutral" onclick="registerEdtProbe()">登记探测设备</button></div>
+          <p class="text-zinc-500">创建后保存专用凭据，在该线路设备运行探测程序。凭据只允许领取探测任务、提交结果，不具有管理权限。</p>
+          <div id="edt-agent-list"></div>
+        </div>
         <!-- Clean IP Current Pools -->
         <div class="mt-4 pt-4 border-t border-zinc-800 space-y-3">
-          <div class="text-xs font-semibold text-zinc-300">当前活跃三网 Anycast Clean IP 优选池</div>
+          <div class="text-xs font-semibold text-zinc-300">当前优选池（线路实测结果有效期 6 小时）</div>
           <div class="grid grid-cols-1 md:grid-cols-3 gap-3 text-xs">
             <div class="p-3 rounded bg-[#161619] border border-zinc-800">
               <div class="font-medium text-emerald-400 mb-1.5 flex items-center justify-between">
@@ -2824,13 +2841,18 @@
         if (document.getElementById('edt-path')) document.getElementById('edt-path').value = edt.path || '/?ed=2048';
 
         renderCleanIPs(edt.clean_ips || {});
+        document.getElementById('edt-candidates').value=(edt.candidates||[]).join('\n');
+        document.getElementById('edt-sources').value=(edt.sources||[]).join('\n');
+        document.getElementById('edt-auto-refresh').checked=edt.auto_refresh_clean_ips;
+        document.getElementById('edt-interval').value=(edt.interval_sec||3600)/60;
+        pollEdtOptimizer();
       } catch (e) {
         console.error('Failed to load EDT config:', e);
       }
     }
 
     function renderCleanIPs(clean_ips) {
-      ['telecom', 'unicom', 'mobile'].forEach(isp => {
+      ['telecom', 'unicom', 'mobile', 'anycast'].forEach(isp => {
         const list = clean_ips[isp] || [];
         const container = document.getElementById(`edt-${isp}-ips`);
         const count = document.getElementById(`edt-${isp}-count`);
@@ -2866,7 +2888,11 @@
         uuid: document.getElementById('edt-uuid').value.trim(),
         pages_uuid: document.getElementById('edt-pages-uuid') ? document.getElementById('edt-pages-uuid').value.trim() : '',
         worker_uuid: document.getElementById('edt-worker-uuid') ? document.getElementById('edt-worker-uuid').value.trim() : '',
-        path: document.getElementById('edt-path').value.trim() || '/?ed=2048'
+        path: document.getElementById('edt-path').value.trim() || '/?ed=2048',
+        candidates: document.getElementById('edt-candidates').value.split(/\s+/).filter(Boolean),
+        sources: document.getElementById('edt-sources').value.split(/\s+/).filter(Boolean),
+        auto_refresh_clean_ips: document.getElementById('edt-auto-refresh').checked,
+        interval_sec: Number(document.getElementById('edt-interval').value)*60
       };
       try {
         const res = await fetch('/api/edt/config', {
@@ -2886,23 +2912,45 @@
       }
     }
 
-    async function refreshCleanIPs() {
-      const btn = document.getElementById('btn-refresh-clean-ips');
-      if (btn) btn.innerText = '正在测速刷新...';
+    let edtOptimizerTimer=null;
+    window.addEventListener('pagehide',()=>clearTimeout(edtOptimizerTimer));
+    async function pollEdtOptimizer() {
+      clearTimeout(edtOptimizerTimer);
       try {
-        const res = await fetch('/api/edt/refresh-clean-ips', { method: 'POST' });
-        if (res.ok) {
-          const data = await res.json();
-          renderCleanIPs(data.clean_ips || {});
-          alert('三网 Anycast Clean IP 优选池已完成重测与刷新！');
-        } else {
-          alert('刷新失败');
-        }
-      } catch (e) {
-        alert('刷新异常: ' + e);
-      } finally {
-        if (btn) btn.innerText = '刷新三网优选 IP';
-      }
+        const response=await fetch('/api/edt/optimizer'); if(!response.ok) return;
+        const state=await response.json();
+        document.getElementById('edt-opt-status').innerText=state.running ? `检测中：${state.completed}/${state.total}` : (state.error||'等待下一轮检测');
+        const names={anycast:'服务器侧',telecom:'电信',unicom:'联通',mobile:'移动'};
+        const reports=Object.values(state.reports||{});
+        document.getElementById('edt-opt-results').innerText=reports.map(r=>{
+          const age=Date.now()/1000-r.timestamp;
+          const good=r.results.filter(v=>v.success_rate===1);
+          const best=good.slice().sort((a,b)=>a.latency_ms-b.latency_ms)[0];
+          return `${names[r.isp]} · ${new Date(r.timestamp*1000).toLocaleString()} · ${age>21600?'已过期':good.length+' 个通过实测'}${best?' · 最快 '+best.latency_ms+' ms / '+best.download_mbps+' Mbps':''}` + '\n' + r.results.slice().sort((a,b)=>(b.success_rate-a.success_rate)||((a.latency_ms||1e9)-(b.latency_ms||1e9))).slice(0,5).map(v=>`  ${v.ip} · 成功 ${Math.round(v.success_rate*100)}% · ${v.latency_ms??'-'} ms · 抖动 ${v.jitter_ms??'-'} ms · ${v.download_mbps??'-'} Mbps${v.failure_reason?' · '+v.failure_reason:''}`).join('\n');
+        }).join('\n')||'没有实测结果；显示的原有候选尚未验证。';
+        const list=document.getElementById('edt-agent-list');list.replaceChildren();
+        (state.agents||[]).forEach(a=>{
+          const row=document.createElement('div');row.className='flex gap-3 mt-2';
+          const label=document.createElement('span');label.textContent=`${names[a.isp]} / ${a.region} / ${a.id}`;
+          const button=document.createElement('button');button.textContent='撤销';button.className='btn-neutral';
+          button.addEventListener('click',async()=>{await fetch('/api/edt/agents/'+encodeURIComponent(a.id),{method:'DELETE'});pollEdtOptimizer();});row.append(label,button);list.append(row);
+        });
+        const config=await fetch('/api/edt/config');if(config.ok)renderCleanIPs((await config.json()).edgetunnel.clean_ips||{});
+        edtOptimizerTimer=setTimeout(pollEdtOptimizer,state.running?3000:30000);
+      } catch(e){edtOptimizerTimer=setTimeout(pollEdtOptimizer,15000);}
+    }
+    async function registerEdtProbe() {
+      const response=await fetch('/api/edt/agents',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({isp:document.getElementById('edt-agent-isp').value,region:document.getElementById('edt-agent-region').value.trim()})});
+      const data=await response.json();if(!response.ok){alert(data.detail||'登记失败');return;}
+      window.prompt('保存此专用探测凭据（只显示一次）。运行方法见仓库 docs/EDT-OPTIMIZER.md：',data.token);pollEdtOptimizer();
+    }
+    async function refreshCleanIPs() {
+      try {
+        const response=await fetch('/api/edt/refresh-clean-ips',{method:'POST'});
+        const data=await response.json();
+        if(!response.ok){alert(data.detail||'启动检测失败');return;}
+        alert('检测任务已启动。请查看进度和实测结果；完成后客户端更新订阅才能载入新的优选节点。');pollEdtOptimizer();
+      } catch(e){alert('启动检测失败');}
     }
 
     // Load Transits
