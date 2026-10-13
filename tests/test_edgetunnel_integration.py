@@ -243,9 +243,14 @@ class TestEdgeTunnelIntegration(unittest.TestCase):
         self.assertEqual(cfg['edgetunnel']['uuid'], '99999999-8888-7777-6666-555555555555')
 
         # 3. POST /api/edt/refresh-clean-ips
-        res = self.client.post('/api/edt/refresh-clean-ips', cookies=cookies)
+        # Unit tests validate scheduling; never run a real network benchmark.
+        with patch('edt_optimizer.Optimizer.start', return_value=True) as start:
+            res = self.client.post('/api/edt/refresh-clean-ips', cookies=cookies)
+            start.assert_called_once_with()
         self.assertEqual(res.status_code, 200)
         self.assertIn('clean_ips', res.json())
+        self.assertEqual(res.json()['status'], 'started')
+        self.assertIn('optimizer', res.json())
 
         # 5. Domain sanitization test in config save
         dirty_payload = {

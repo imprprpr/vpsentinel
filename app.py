@@ -1277,6 +1277,11 @@ def save_edt_config(data: dict, request: Request):
     proposed = dict(cfg_mgr.load().get('edgetunnel', {}))
     proposed.update({k: data[k] for k in ('enabled', 'pages_domain', 'worker_domain', 'uuid', 'pages_uuid', 'worker_uuid', 'path', 'proxy_ip') if k in data})
     try:
+        for name in ('pages_domain', 'worker_domain'):
+            if name in data:
+                if not isinstance(data[name], str):
+                    raise ValueError('Endpoint domains must be strings')
+                proposed[name] = clean_ip_mgr.sanitize_domain(data[name])
         if proposed.get('enabled'): endpoints(proposed)
         candidates = [validate_candidate(v) for v in data.get('candidates', [])]
         sources = [https_url(v) for v in data.get('sources', [])]
@@ -1313,7 +1318,8 @@ def refresh_edt_clean_ips(request: Request):
     try:
         from edt_optimizer import Optimizer
         started = Optimizer.start()
-        return {'status': 'started' if started else 'running', 'optimizer': Optimizer.status()}
+        return {'status': 'started' if started else 'running', 'optimizer': Optimizer.status(),
+                'clean_ips': clean_ip_mgr.CleanIPManager.get_clean_ips()}
     except ValueError as e:
         raise HTTPException(status_code=422, detail=str(e))
 
