@@ -5,6 +5,8 @@ import hashlib
 import hmac
 import ipaddress
 import json
+import re
+import urllib.request
 import secrets
 import ssl
 import statistics
@@ -70,7 +72,7 @@ async def measure_endpoint(ip, endpoint):
     started = time.perf_counter()
     async with websockets.connect('wss://' + endpoint['host'] + endpoint['path'],
             host=validate_candidate(ip), port=443, server_hostname=endpoint['host'],
-            ssl=ssl.create_default_context(), compression=None, max_size=1048576,
+            ssl=ssl.create_default_context(), proxy=None, compression=None, max_size=1048576,
             open_timeout=7, close_timeout=1) as ws:
         target = b'speed.cloudflare.com'
         header = b'\x00' + uuid.UUID(endpoint['uuid']).bytes + b'\x00\x01\x01\xbb\x02' + bytes([len(target)]) + target
@@ -155,31 +157,112 @@ async def measure_candidates(task, progress=None):
     return await asyncio.gather(*(candidate(validate_candidate(ip)) for ip in task['candidates']))
 
 
+def parse_source(text):
+    """Parse public CF IPv4 / IP:443#remarks, never treat remarks as addresses."""
+    records = []
+    for line in text.splitlines()[:512]:
+        address, _, note = line.strip().partition('#')
+        if note and 'bestcf.pages.dev' in note.lower():
+            continue  # Source banner/footer addresses are not recommendations.
+        for token in re.split(r'[\s,]+', address):
+            if not token:
+                continue
+            value, colon, port = token.partition(':')
+            if colon and port != '443':
+                continue
+            try:
+                value = validate_candidate(value)
+            except ValueError:
+                continue
+            isp = next((key for label, key in (('电信', 'telecom'), ('联通', 'unicom'),
+                                               ('移动', 'mobile')) if label in note), 'unknown')
+            record = {'ip': value, 'isp': isp}
+            if record not in records:
+                records.append(record)
+            if len(records) >= 256:
+                return records
+    return records
+
+
 def collect_candidates(edt):
-    opt = edt.get('optimizer', {}); values = list(opt.get('candidates', []))
-    for pool in edt.get('clean_ips', {}).values():
-        for item in pool:
-            try: values.append(validate_candidate(item))
-            except ValueError: pass
-    # Only administrator configured HTTPS sources; no credentials, redirects or private hosts.
-    for url in opt.get('sources', [])[:3]:
+    opt = edt.get('optimizer', {})
+    sources = list(dict.fromkeys(opt.get('sources', [])[:3]))
+    now = time.time()
+    cache, status, records = {}, [], []
+    for url in sources:
+        old = opt.get('source_cache', {}).get(url, {})
+        entry = old
+        error = None
         try:
             validate_url(url)
-            with open_secure(url, timeout=6) as response:
-                raw = read_limited(response, 16384).decode()
-            for item in raw.replace(',', ' ').split()[:256]:
-                try: values.append(validate_candidate(item))
-                except ValueError: pass
-        except Exception: pass
-    # Obtain fresh candidates by bounded sampling of the official address ranges.
+            if now - old.get('timestamp', 0) >= 1800:
+                request = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0',
+                                                               'Accept': 'text/plain'})
+                with open_secure(request, timeout=6) as response:
+                    parsed = parse_source(read_limited(response, 16384).decode('utf-8-sig'))
+                if not parsed:
+                    raise ValueError('No compatible candidates in source')
+                entry = {'timestamp': now, 'records': parsed}
+        except Exception as exc:
+            error = type(exc).__name__
+        usable = now - entry.get('timestamp', 0) < 21600
+        if usable:
+            cache[url] = entry
+            for record in entry.get('records', [])[:256]:
+                try:
+                    ip = validate_candidate(record['ip'])
+                    isp = record['isp'] if record['isp'] in ISPS else 'unknown'
+                except (ValueError, KeyError, TypeError):
+                    continue
+                records.append({'ip': ip, 'isp': isp, 'source': url})
+        status.append({'url': url, 'count': len(entry.get('records', [])) if usable else 0,
+                       'timestamp': entry.get('timestamp') if usable else None,
+                       'error': error, 'cached_fallback': bool(error and usable)})
+    # Interleave providers within each operator, then rotate operators and other buckets.
+    buckets = {key: [] for key in ('manual', 'previous', *ISPS, 'unknown', 'sample')}
+    for key, values in [('manual', opt.get('candidates', [])),
+                        ('previous', [ip for pool in edt.get('clean_ips', {}).values() for ip in pool])]:
+        for value in values:
+            try:
+                ip = validate_candidate(value)
+                if ip not in buckets[key]: buckets[key].append(ip)
+            except ValueError:
+                pass
+    for isp in (*ISPS, 'unknown'):
+        by_source = [[r['ip'] for r in records if r['isp'] == isp and r['source'] == url] for url in sources]
+        for index in range(max((len(v) for v in by_source), default=0)):
+            for values in by_source:
+                if index < len(values) and values[index] not in buckets[isp]:
+                    buckets[isp].append(values[index])
     for net in CF_NETWORKS:
-        values.append(str(net.network_address + secrets.randbelow(net.num_addresses-2)+1))
-    valid = []
-    for item in values:
-        try: item = validate_candidate(item)
-        except ValueError: continue
-        if item not in valid: valid.append(item)
-    return valid[:LIMIT]
+        buckets['sample'].append(str(net.network_address + secrets.randbelow(net.num_addresses-2)+1))
+    cursors = dict(opt.get('candidate_cursors', {}))
+    rotated = {}
+    for key, values in buckets.items():
+        offset = int(cursors.get(key, 0)) % len(values) if values else 0
+        rotated[key] = values[offset:] + values[:offset]
+    chosen, consumed = [], {key: 0 for key in buckets}
+    for index in range(max((len(v) for v in rotated.values()), default=0)):
+        for key, values in rotated.items():
+            if index < len(values):
+                consumed[key] += 1
+                if values[index] not in chosen: chosen.append(values[index])
+                if len(chosen) == LIMIT: break
+        if len(chosen) == LIMIT: break
+    pool = {}
+    for record in records:
+        item = pool.setdefault(record['ip'], {'ip': record['ip'], 'isps': [], 'sources': []})
+        for field, value in [('isps', record['isp']), ('sources', record['source'])]:
+            if value not in item[field]: item[field].append(value)
+    def save(cfg):
+        current = cfg.setdefault('edgetunnel', {}).setdefault('optimizer', {})
+        if list(dict.fromkeys(current.get('sources', [])[:3])) != sources:
+            return  # Administrator replaced the source list while we were fetching.
+        current.update(source_cache=cache, source_status=status,
+                       candidate_pool=list(pool.values())[:768],
+                       candidate_cursors={k: int(cursors.get(k, 0)) + consumed[k] for k in buckets})
+    ConfigManager.update(save)
+    return chosen
 
 
 def choose(rows, previous):
@@ -268,7 +351,9 @@ class Optimizer:
         opt = ConfigManager.load().get('edgetunnel', {}).get('optimizer', {})
         reports = {k: {f: v for f, v in r.items() if f != 'fingerprint'} for k, r in opt.get('reports', {}).items()}
         with cls.lock: state = copy.deepcopy(cls.state)
-        return dict(state, reports=reports, last_completed_at=opt.get('last_completed_at'),
+        return dict(state, reports=reports, source_status=opt.get('source_status', []),
+                    candidate_pool_count=len(opt.get('candidate_pool', [])),
+                    last_completed_at=opt.get('last_completed_at'),
                     agents=[{'id': a['id'], 'isp': a['isp'], 'region': a['region']} for a in opt.get('agents', [])])
 
     @classmethod

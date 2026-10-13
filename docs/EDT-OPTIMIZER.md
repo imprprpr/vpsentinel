@@ -36,3 +36,15 @@ export VPSENTINEL_PROBE_TOKEN
 ## 范围
 
 支持 IPv4、标准 VLESS TCP-over-WebSocket、TLS 443 和标准二进制 VLESS 响应。沿用订阅配置中的 `proxy_ip` 路径覆盖（公网 IP 或域名）。不支持非标准握手/私有 CA/客户端证书等扩展。端点部署、三网设备的接入与不同客户端的实际使用需对应环境验收。候选来源失效不阻止手动候选和官方网段采样。
+
+## 合并公开候选池
+
+支持纯 IPv4 和 `IP:443#备注` 文本，忽略宣传行、非 443 端口、IPv6 和非 Cloudflare 公网地址。公开来源使用浏览器 User-Agent 获取，继续验证 HTTPS 证书、禁止重定向及内网访问；每源上限 16 KiB / 256 条，最多三个来源。
+
+已读取可作为候选的列表：
+
+- https://bestcf.pages.dev/wetest/ipv4.txt
+- https://bestcf.pages.dev/uouin/all.txt
+- https://bestcf.pages.dev/vvhan/ipv4.txt
+
+来源成功结果缓存 30 分钟，获取失败时最多沿用 6 小时内的缓存；状态接口显示来源错误和缓存回退。各来源在运营商分类中交错排列，每轮从手动地址、原池、三网分类、未分类地址和官方网段采样中轮流选取最多 24 个。每类游标持久化，后续轮次继续覆盖候选池。来源标签不作为三网实测证明；候选仅经过完整端点验证后才下发。

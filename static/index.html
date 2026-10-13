@@ -714,10 +714,11 @@
           <p class="text-zinc-400">检测完整 VLESS 连接和 64 KiB HTTPS 下载。服务器侧测速不代表国内三网；三网探测设备需运行在对应运营商网络，线路与地区由管理员登记。</p>
           <label class="block">候选 Cloudflare IPv4（每行一个，最多 24 个；留空则从官方网段采样）</label>
           <textarea id="edt-candidates" class="w-full bg-zinc-900 p-2 rounded" rows="3"></textarea>
-          <label class="block">可信候选来源（每行一个 HTTPS 文本地址，最多 3 个；内容为 IPv4 列表）</label>
+          <label class="block">可信候选来源（每行一个 HTTPS 文本地址，最多 3 个；支持 IPv4 或 IP:443#备注；外部运营商标签仅为候选分类）</label>
           <textarea id="edt-sources" class="w-full bg-zinc-900 p-2 rounded" rows="2"></textarea>
           <label><input type="checkbox" id="edt-auto-refresh"> 定时自动检测</label>
           <label>间隔（分钟） <input id="edt-interval" type="number" min="15" max="1440" value="60" class="bg-zinc-900 p-2 w-24"></label>
+          <p id="edt-source-status" class="text-zinc-400 whitespace-pre-wrap"></p>
           <p id="edt-opt-status" class="text-blue-300">尚未开始实测</p>
           <div id="edt-opt-results" class="text-zinc-400 whitespace-pre-wrap"></div>
           <div class="bg-zinc-900 p-3 rounded"><strong>服务器侧优选</strong><div id="edt-anycast-ips" class="font-mono mt-2"></div></div>
@@ -2920,6 +2921,7 @@
         const response=await fetch('/api/edt/optimizer'); if(!response.ok) return;
         const state=await response.json();
         document.getElementById('edt-opt-status').innerText=state.running ? `检测中：${state.completed}/${state.total}` : (state.error||'等待下一轮检测');
+        document.getElementById('edt-source-status').textContent=`合并公开候选：${state.candidate_pool_count||0} 个（尚未实测）`+'\n'+(state.source_status||[]).map(s=>`${s.url} · ${s.count} 条${s.error?' · 获取失败：'+s.error:''}${s.cached_fallback?' · 沿用缓存':''}`).join('\n');
         const names={anycast:'服务器侧',telecom:'电信',unicom:'联通',mobile:'移动'};
         const reports=Object.values(state.reports||{});
         document.getElementById('edt-opt-results').innerText=reports.map(r=>{
