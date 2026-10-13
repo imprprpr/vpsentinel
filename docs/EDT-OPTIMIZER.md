@@ -31,4 +31,4 @@ export VPSENTINEL_PROBE_TOKEN
 
 ## 范围
 
-支持 IPv4、标准 VLESS TCP-over-WebSocket、TLS 443 和标准二进制 VLESS 响应。不支持自定义 `proxy_ip` 覆盖、非标准握手/私有 CA/客户端证书等扩展。端点部署、三网设备的接入与不同客户端的实际使用需对应环境验收。候选来源失效不阻止手动候选和官方网段采样。
+支持 IPv4、标准 VLESS TCP-over-WebSocket、TLS 443 和标准二进制 VLESS 响应。沿用订阅配置中的 `proxy_ip` 路径覆盖（公网 IP 或域名）。不支持非标准握手/私有 CA/客户端证书等扩展。端点部署、三网设备的接入与不同客户端的实际使用需对应环境验收。候选来源失效不阻止手动候选和官方网段采样。

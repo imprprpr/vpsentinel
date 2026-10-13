@@ -42,7 +42,12 @@ def endpoints(edt):
             if ipaddress_like(host): raise ValueError('Endpoint must be a hostname')
             uuid.UUID(key)
             path = edt.get('path', '/?ed=2048') or '/?ed=2048'
-            if edt.get('proxy_ip'): raise ValueError('Optimizer does not support proxy_ip overrides')
+            proxy_ip = edt.get('proxy_ip', '').strip()
+            if proxy_ip and 'proxyip=' not in path:
+                validate_host(proxy_ip)
+                if ipaddress_like(proxy_ip) and not ipaddress.ip_address(proxy_ip).is_global:
+                    raise ValueError('Proxy override must be public')
+                path = '/proxyip=' + proxy_ip
             if not path.startswith('/') or path.startswith('//') or len(path) > 512 or any(c in path for c in '\r\n#'):
                 raise ValueError('Invalid WebSocket path')
             found.append({'host': host, 'uuid': key, 'path': path})
