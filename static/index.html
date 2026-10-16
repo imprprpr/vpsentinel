@@ -545,10 +545,10 @@
       <div class="card p-5 space-y-4">
         <!-- Platform Switcher Tabs -->
         <div id="sub-format-tabs" role="group" aria-label="订阅客户端格式" class="flex flex-wrap items-center gap-1.5 p-1 bg-[#161619] border border-zinc-800 rounded-lg text-xs font-medium">
-          <button class="sub-tab px-3 py-1.5 rounded transition-all bg-zinc-800 text-white shadow-sm" onclick="switchSubTab('clash')">Clash / Mihomo</button>
-          <button class="sub-tab px-3 py-1.5 rounded transition-all text-zinc-400 hover:text-white" onclick="switchSubTab('v2ray')">v2rayN / v2rayNG (Base64)</button>
-          <button class="sub-tab px-3 py-1.5 rounded transition-all text-zinc-400 hover:text-white" onclick="switchSubTab('singbox')">Sing-box (JSON)</button>
-          <button class="sub-tab px-3 py-1.5 rounded transition-all text-zinc-400 hover:text-white" onclick="switchSubTab('shadowrocket')">小火箭 Shadowrocket</button>
+          <button class="sub-tab px-3 py-1.5 rounded transition-all bg-zinc-800 text-white shadow-sm" data-sub-format="clash" onclick="switchSubTab('clash')">Clash / Mihomo</button>
+          <button class="sub-tab px-3 py-1.5 rounded transition-all text-zinc-400 hover:text-white" data-sub-format="v2ray" onclick="switchSubTab('v2ray')">v2rayN / v2rayNG (Base64)</button>
+          <button class="sub-tab px-3 py-1.5 rounded transition-all text-zinc-400 hover:text-white" data-sub-format="singbox" onclick="switchSubTab('singbox')">Sing-box (JSON)</button>
+          <button class="sub-tab px-3 py-1.5 rounded transition-all text-zinc-400 hover:text-white" data-sub-format="shadowrocket" onclick="switchSubTab('shadowrocket')">小火箭 Shadowrocket</button>
         </div>
 
         <div class="flex flex-col md:flex-row md:items-center justify-between gap-3 border-b border-zinc-800 pb-4 pt-1">
@@ -2655,8 +2655,50 @@
       actions[el.dataset.action]?.();
     });
 
+    // Hash routes preserve the configured console path and need no server rewrite.
+    const consoleTabs = ['overview', 'rules', 'transits', 'services', 'mesh'];
+    const subscriptionFormats = ['clash', 'v2ray', 'singbox', 'shadowrocket'];
+    let renderedConsoleRoute = null;
+
+    function readConsoleRoute() {
+      const url = new URL(window.location.href);
+      const hash = url.hash.slice(1);
+      const parts = hash.startsWith('/') ? hash.slice(1).split('/') : [];
+      const tab = parts.length ? parts[0] : (url.searchParams.get('tab') || hash || 'overview');
+      return {
+        tab: consoleTabs.includes(tab) ? tab : 'overview',
+        format: tab === 'rules' && subscriptionFormats.includes(parts[1]) ? parts[1] : 'clash'
+      };
+    }
+
+    function consoleRouteKey(tabId, format = currentSubFmt) {
+      return `#/${tabId}${tabId === 'rules' ? '/' + format : ''}`;
+    }
+
+    function writeConsoleRoute(tabId, replace = false) {
+      const url = new URL(window.location.href);
+      url.searchParams.delete('tab');
+      url.hash = consoleRouteKey(tabId);
+      if (url.href !== window.location.href) {
+        window.history[replace ? 'replaceState' : 'pushState'](window.history.state, '', url.href);
+      }
+      renderedConsoleRoute = url.hash;
+    }
+
+    function restoreConsoleRoute() {
+      const route = readConsoleRoute();
+      const key = consoleRouteKey(route.tab, route.format);
+      if (key === renderedConsoleRoute && window.location.hash === key) return;
+      switchSubTab(route.format, { syncRoute: false });
+      switchTab(route.tab, { syncRoute: false });
+      writeConsoleRoute(route.tab, true);
+    }
+
+    window.addEventListener('popstate', restoreConsoleRoute);
+    window.addEventListener('hashchange', restoreConsoleRoute);
+
     // Tab switching
-    function switchTab(tabId) {
+    function switchTab(tabId, { syncRoute = true } = {}) {
       if (!['overview', 'rules', 'transits', 'services', 'mesh'].includes(tabId)) tabId = 'overview';
       document.querySelectorAll('[data-mobile-tab]').forEach(button => {
         if (button.dataset.mobileTab === tabId) button.setAttribute('aria-current', 'page');
@@ -2689,6 +2731,7 @@
         loadMeshOverview();
         loadCertSyncInfo();
       }
+      if (syncRoute) writeConsoleRoute(tabId);
     }
 
     function togglePrivacy(el) {
@@ -2721,12 +2764,16 @@
       }
     }
 
-    function switchSubTab(fmt) {
+    function switchSubTab(fmt, { syncRoute = true } = {}) {
+      if (!subscriptionFormats.includes(fmt)) fmt = 'clash';
       currentSubFmt = fmt;
-      document.querySelectorAll('.sub-tab').forEach(b => {
-        b.className = 'sub-tab px-3 py-1.5 rounded transition-all text-zinc-400 hover:text-white';
+      document.querySelectorAll('.sub-tab').forEach(button => {
+        const selected = button.dataset.subFormat === fmt;
+        button.className = selected
+          ? 'sub-tab px-3 py-1.5 rounded transition-all bg-zinc-800 text-white shadow-sm'
+          : 'sub-tab px-3 py-1.5 rounded transition-all text-zinc-400 hover:text-white';
+        button.setAttribute('aria-pressed', String(selected));
       });
-      event.currentTarget.className = 'sub-tab px-3 py-1.5 rounded transition-all bg-zinc-800 text-white shadow-sm';
 
       const titleEl = document.getElementById('sub-title');
       const descEl = document.getElementById('sub-desc');
@@ -2761,6 +2808,7 @@
         importBtnText.innerText = '一键导入小火箭';
         importBtn.style.display = 'inline-flex';
       }
+      if (syncRoute) writeConsoleRoute('rules');
     }
 
     function importToClient() {
@@ -5679,8 +5727,7 @@
     }
 
     window.addEventListener('DOMContentLoaded', async () => {
-      const tabParam = new URLSearchParams(window.location.search).get('tab') || window.location.hash.replace('#', '') || 'overview';
-      switchTab(tabParam);
+      restoreConsoleRoute();
 
       const authed = await checkAuthStatus();
       if (authed) {
