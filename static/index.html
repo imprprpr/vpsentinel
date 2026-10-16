@@ -1316,7 +1316,7 @@
               <h3 class="text-sm font-semibold text-white">国内三网与国际核心骨干往返延迟矩阵</h3>
               <span class="text-[10px] font-mono px-1.5 py-0.5 rounded bg-zinc-800 text-zinc-400">8 Targets</span>
             </div>
-            <span class="text-xs text-zinc-500 font-mono">ICMP RTT / Jitter 探测</span>
+            <span class="text-xs text-zinc-500 font-mono">服务器侧 ICMP RTT / 标准差</span>
           </div>
 
           <div class="overflow-x-auto">
@@ -1328,7 +1328,7 @@
                   <th class="pb-2 font-normal">区域</th>
                   <th class="pb-2 font-normal">丢包率</th>
                   <th class="pb-2 font-normal">平均延迟 (RTT)</th>
-                  <th class="pb-2 font-normal">抖动 (Jitter)</th>
+                  <th class="pb-2 font-normal">抖动 (标准差)</th>
                   <th class="pb-2 font-normal text-right">链路状态</th>
                 </tr>
               </thead>
@@ -4981,41 +4981,38 @@
       if (res.three_network && res.three_network.length > 0) {
         const tbody = document.getElementById('three-network-tbody');
         if (tbody) {
-          const rowsHtml = res.three_network.map(item => {
-            let dotColor = 'bg-zinc-500';
-            if (item.isp === '电信') dotColor = 'bg-blue-500';
-            else if (item.isp === '联通') dotColor = 'bg-rose-500';
-            else if (item.isp === '移动') dotColor = 'bg-emerald-500';
-            else if (item.isp === 'BGP') dotColor = 'bg-amber-500';
-            else if (item.isp === '国际') dotColor = 'bg-orange-500';
-
-            const lossText = item.loss !== null ? `${item.loss}%` : '--%';
-            const lossClass = item.loss === 0 ? 'text-emerald-400' : (item.loss < 20 ? 'text-amber-400' : 'text-rose-400');
-            const avgText = item.avg_ms !== null ? `${item.avg_ms} ms` : '超时';
-            const jitterText = item.jitter_ms !== null ? `${item.jitter_ms} ms` : '--';
-
-            let badgeClass = 'badge bg-zinc-800 text-zinc-400 text-[10px]';
-            if (item.badge === 'success') badgeClass = 'badge bg-emerald-950/70 text-emerald-400 border border-emerald-600/30 text-[10px]';
-            else if (item.badge === 'info') badgeClass = 'badge bg-blue-950/70 text-blue-400 border border-blue-600/30 text-[10px]';
-            else if (item.badge === 'warning') badgeClass = 'badge bg-amber-950/70 text-amber-400 border border-amber-600/30 text-[10px]';
-            else if (item.badge === 'danger') badgeClass = 'badge bg-rose-950/70 text-rose-400 border border-rose-600/30 text-[10px]';
-
-            return `
-              <tr>
-                <td class="py-2.5 font-medium text-white flex items-center gap-1.5">
-                  <span class="w-2 h-2 rounded-full ${dotColor}"></span>
-                  <span>${item.name}</span>
-                </td>
-                <td class="py-2.5 text-zinc-400">${item.isp}</td>
-                <td class="py-2.5 text-zinc-400">${item.region}</td>
-                <td class="py-2.5 ${lossClass}">${lossText}</td>
-                <td class="py-2.5 text-white font-semibold">${avgText}</td>
-                <td class="py-2.5 text-zinc-400">${jitterText}</td>
-                <td class="py-2.5 text-right"><span class="${badgeClass}">${item.status}</span></td>
-              </tr>
-            `;
-          }).join('');
-          tbody.innerHTML = safeHtml(rowsHtml);
+          const fragment = document.createDocumentFragment();
+          for (const item of res.three_network) {
+            const row = document.createElement('tr');
+            const cell = (text, className = 'py-2.5 text-zinc-400') => {
+              const td = document.createElement('td');
+              td.className = className;
+              td.textContent = String(text ?? '—');
+              row.append(td);
+              return td;
+            };
+            const name = cell('', 'py-2.5 font-medium text-white');
+            const label = document.createElement('div');
+            label.className = 'flex items-center gap-1.5';
+            const dot = document.createElement('span');
+            const colors = {电信:'bg-blue-500', 联通:'bg-rose-500', 移动:'bg-emerald-500', BGP:'bg-amber-500', 国际:'bg-orange-500'};
+            dot.className = 'w-2 h-2 rounded-full shrink-0 ' + (colors[item.isp] || 'bg-zinc-500');
+            const text = document.createElement('span');
+            text.textContent = String(item.name ?? '未知目标');
+            label.append(dot, text); name.append(label);
+            cell(item.isp); cell(item.region);
+            const loss = Number.isFinite(item.loss) ? item.loss : null;
+            cell(loss === null ? '—' : `${loss}%`, 'py-2.5 ' + (loss === null ? 'text-zinc-500' : loss === 0 ? 'text-emerald-400' : loss < 20 ? 'text-amber-400' : 'text-rose-400'));
+            cell(Number.isFinite(item.avg_ms) ? `${item.avg_ms} ms` : '—', 'py-2.5 text-white font-semibold');
+            cell(Number.isFinite(item.jitter_ms) ? `${item.jitter_ms} ms` : '—');
+            const status = cell('', 'py-2.5 text-right');
+            const badge = document.createElement('span');
+            const badges = {success:'text-emerald-400 bg-emerald-950/70',info:'text-blue-400 bg-blue-950/70',warning:'text-amber-400 bg-amber-950/70',danger:'text-rose-400 bg-rose-950/70'};
+            badge.className = 'badge text-[10px] whitespace-nowrap ' + (badges[item.badge] || 'bg-zinc-800 text-zinc-400');
+            badge.textContent = String(item.status ?? '未知');
+            status.append(badge); fragment.append(row);
+          }
+          tbody.replaceChildren(fragment);
         }
 
         // Calculate and update cn avg
@@ -5023,7 +5020,10 @@
         if (cnPings.length > 0) {
           const avg = (cnPings.reduce((a, b) => a + b, 0) / cnPings.length).toFixed(1);
           const cnAvgEl = document.getElementById('metric-cn-avg');
-          if (cnAvgEl) cnAvgEl.innerText = `国内三网均值: ~${avg}ms`;
+          if (cnAvgEl) cnAvgEl.innerText = `国内运营商样本均值: ~${avg}ms`;
+        } else {
+          const cnAvgEl = document.getElementById('metric-cn-avg');
+          if (cnAvgEl) cnAvgEl.innerText = '国内运营商样本均值: 暂无有效样本';
         }
       }
     }

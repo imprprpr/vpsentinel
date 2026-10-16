@@ -6,6 +6,7 @@ Author: Antigravity Agent
 """
 
 import time
+import os
 import json
 import logging
 import re
@@ -23,68 +24,61 @@ BENCHMARK_TARGETS = [
     {"name": "中国移动 (广州)", "isp": "移动", "region": "华南", "host": "120.196.165.24"},
     {"name": "腾讯云 BGP (全国优选)", "isp": "BGP", "region": "亚太", "host": "119.29.29.29"},
     {"name": "阿里云 BGP (全国优选)", "isp": "BGP", "region": "亚太", "host": "223.5.5.5"},
-    {"name": "Cloudflare Anycast", "isp": "国际", "region": "北美", "host": "1.1.1.1"},
+    {"name": "Cloudflare Anycast", "isp": "国际", "region": "Anycast", "host": "1.1.1.1"},
     {"name": "Google DNS", "isp": "国际", "region": "全球", "host": "8.8.8.8"},
 ]
 
 def ping_target(target: Dict[str, str], count: int = 3) -> Dict[str, Any]:
     host = target["host"]
     res = {
-        "name": target["name"],
-        "isp": target["isp"],
-        "region": target["region"],
-        "host": host,
-        "loss": 100,
-        "avg_ms": None,
-        "min_ms": None,
-        "max_ms": None,
-        "jitter_ms": None,
-        "status": "unreachable",
-        "badge": "danger"
+        "name": target["name"], "isp": target["isp"], "region": target["region"],
+        "host": host, "loss": None, "avg_ms": None, "min_ms": None, "max_ms": None,
+        "jitter_ms": None, "status": "探测不可用", "badge": "secondary",
+        "method": "icmp", "error_code": None
     }
     try:
-        cmd = ["ping", "-c", str(count), "-W", "2", host]
-        p = subprocess.run(cmd, capture_output=True, text=True, timeout=6)
-        if p.returncode == 0 or "packet loss" in p.stdout:
-            for line in p.stdout.splitlines():
-                if "packet loss" in line or "loss" in line:
-                    m = re.search(r"([\d\.]+)%\s*(?:packet\s*)?loss", line, re.I)
-                    if m:
-                        try:
-                            res["loss"] = int(round(float(m.group(1))))
-                        except Exception:
-                            res["loss"] = 0
-                if "rtt min/avg/max" in line or "round-trip min/avg/max" in line:
-                    parts = line.split("=")[1].strip().split("/")
-                    res["min_ms"] = round(float(parts[0]), 1)
-                    res["avg_ms"] = round(float(parts[1]), 1)
-                    res["max_ms"] = round(float(parts[2]), 1)
-                    res["jitter_ms"] = round(float(parts[3].split()[0]), 1)
-                    
-                    avg = res["avg_ms"]
-                    if res["loss"] >= 50:
-                        res["status"] = "丢包严重"
-                        res["badge"] = "danger"
-                    elif avg < 60:
-                        res["status"] = "极速"
-                        res["badge"] = "success"
-                    elif avg < 160:
-                        res["status"] = "优良"
-                        res["badge"] = "success"
-                    elif avg < 230:
-                        res["status"] = "正常"
-                        res["badge"] = "info"
-                    else:
-                        res["status"] = "偏高"
-                        res["badge"] = "warning"
+        count = max(1, min(int(count), 5))
+        dedicated_ping = os.path.join(os.path.dirname(os.path.abspath(__file__)), "bin", "ping")
+        ping_tool = dedicated_ping if os.path.isfile(dedicated_ping) else "ping"
+        cmd = [ping_tool, "-n", "-c", str(count), "-W", "2", "-w", str(count * 2 + 1), host]
+        env = dict(os.environ, LC_ALL="C", LANGUAGE="C")
+        p = subprocess.run(cmd, capture_output=True, text=True, timeout=count * 2 + 3, env=env)
+        failure = (p.stderr or '').lower()
+        if any(message in failure for message in ('operation not permitted', 'permission denied', 'cap_net_raw')):
+            res.update(status="本机无 ICMP 权限", error_code="permission_denied")
+            return res
+        loss = re.search(r"([\d.]+)%\s*(?:packet\s*)?loss", p.stdout, re.I)
+        if loss:
+            res['loss'] = round(float(loss.group(1)), 1)
+        rtt = re.search(r"(?:rtt|round-trip)[^=]*=\s*([\d.]+)/([\d.]+)/([\d.]+)(?:/([\d.]+))?", p.stdout)
+        if rtt:
+            res.update(min_ms=round(float(rtt[1]), 1), avg_ms=round(float(rtt[2]), 1),
+                       max_ms=round(float(rtt[3]), 1),
+                       jitter_ms=round(float(rtt[4]), 1) if rtt[4] else None)
+            avg = res['avg_ms']
+            if res['loss'] is not None and res['loss'] >= 50:
+                res.update(status="丢包严重", badge="danger")
+            elif avg < 60:
+                res.update(status="极速", badge="success")
+            elif avg < 160:
+                res.update(status="优良", badge="success")
+            elif avg < 230:
+                res.update(status="正常", badge="info")
+            else:
+                res.update(status="偏高", badge="warning")
+        elif res['loss'] is not None:
+            res.update(status="未收到 ICMP 回应", badge="warning", error_code="no_reply")
         else:
-            res["status"] = "超时 / 阻断"
-            res["badge"] = "danger"
-    except Exception as e:
-        logger.debug(f"Ping {host} error: {e}")
-        res["status"] = "探测异常"
-        res["badge"] = "secondary"
-
+            res.update(status="探测执行失败", error_code="ping_failed")
+    except FileNotFoundError:
+        res.update(status="本机缺少 ping 工具", error_code="ping_missing")
+    except PermissionError:
+        res.update(status="本机无 ICMP 权限", error_code="permission_denied")
+    except subprocess.TimeoutExpired:
+        res.update(status="探测进程超时", error_code="process_timeout")
+    except Exception as exc:
+        logger.debug("Ping %s error: %s", host, type(exc).__name__)
+        res.update(status="探测异常", error_code="probe_error")
     return res
 
 def run_latency_benchmarks() -> List[Dict[str, Any]]:
@@ -188,9 +182,12 @@ class SpeedtestManager:
 
             # Calculate china avg latency
             cn_pings = [x["avg_ms"] for x in result["three_network"] if x.get("isp") in ("电信", "联通", "移动") and x.get("avg_ms")]
-            cn_avg = sum(cn_pings) / len(cn_pings) if cn_pings else 200.0
+            cn_avg = sum(cn_pings) / len(cn_pings) if cn_pings else None
 
-            if mode == "full":
+            if cn_avg is None:
+                result["rating"] = "N/A"
+                result["rating_desc"] = "未获得国内运营商的有效 ICMP 样本"
+            elif mode == "full":
                 if dl >= 100 and cn_avg < 180:
                     result["rating"] = "A+"
                     result["rating_desc"] = "超高带宽 / 极佳跨境链路"
@@ -218,7 +215,7 @@ class SpeedtestManager:
                     result["rating"] = "C"
                     result["rating_desc"] = "网络延迟偏高"
 
-            result["success"] = True
+            result["success"] = bool(cn_pings or result.get("bandwidth"))
             result["duration_sec"] = round(time.time() - t0, 1)
             self.stage = "done"
             self.progress_msg = f"测速完成，耗时 {result['duration_sec']} 秒"
@@ -231,7 +228,7 @@ class SpeedtestManager:
                     "download_mbps": dl,
                     "upload_mbps": ul,
                     "ping_ms": result.get("bandwidth", {}).get("ping_ms", 0) if result.get("bandwidth") else 0,
-                    "cn_avg_latency": round(cn_avg, 1)
+                    "cn_avg_latency": round(cn_avg, 1) if cn_avg is not None else None
                 })
                 if len(self.history) > 10:
                     self.history.pop()

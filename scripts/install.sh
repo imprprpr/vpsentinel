@@ -32,16 +32,16 @@ echo ">>> Detecting Linux distribution and package manager..."
 if command -v apt-get >/dev/null 2>&1; then
     echo ">>> Detected Debian/Ubuntu ecosystem (apt-get)."
     apt-get update -y
-    apt-get install -y python3 python3-pip python3-venv git curl openssl iptables
+    apt-get install -y python3 python3-pip python3-venv git curl openssl iptables iputils-ping
 elif command -v dnf >/dev/null 2>&1; then
     echo ">>> Detected RHEL/Fedora/AlmaLinux/Rocky ecosystem (dnf)."
-    dnf install -y python3 python3-pip git curl openssl iptables
+    dnf install -y python3 python3-pip git curl openssl iptables iputils
 elif command -v yum >/dev/null 2>&1; then
     echo ">>> Detected CentOS/RHEL legacy ecosystem (yum)."
-    yum install -y python3 python3-pip git curl openssl iptables
+    yum install -y python3 python3-pip git curl openssl iptables iputils
 elif command -v pacman >/dev/null 2>&1; then
     echo ">>> Detected Arch Linux ecosystem (pacman)."
-    pacman -Sy --noconfirm python python-pip git curl openssl iptables
+    pacman -Sy --noconfirm python python-pip git curl openssl iptables iputils
 else
     echo "[!] Warning: Unknown package manager. Please ensure python3, pip, git, curl, and openssl are installed."
 fi
@@ -79,6 +79,7 @@ fi
 
 # Code remains root-owned; writable data has a separate service account.
 getent passwd vpsentinel >/dev/null || useradd --system --home-dir /var/lib/vpsentinel --shell /usr/sbin/nologin vpsentinel
+bash "$INSTALL_DIR/scripts/configure-ping.sh"
 install -d -m 0700 -o vpsentinel -g vpsentinel /var/lib/vpsentinel
 install -d -m 0700 -o vpsentinel -g vpsentinel /etc/vpsentinel/cert
 if [ -f "$INSTALL_DIR/config.json" ] && [ ! -f /var/lib/vpsentinel/config.json ]; then
