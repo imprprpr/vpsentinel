@@ -1,5 +1,7 @@
 # VPSentinel
 
+> **v2.7.0 · 2026-10-16**：[版本说明](https://github.com/imprprpr/vpsentinel/releases/tag/v2.7.0) · [更新日志](CHANGELOG.md) · [Release 模板](.github/RELEASE_TEMPLATE.md)
+
 > **2026-10-13 安全整改**：升级前请阅读 [升级与验证说明](docs/SECURITY-REMEDIATION-2026-10-13.md)。管理、订阅、Mesh 监控和证书同步使用不同凭证；新安装采用普通用户服务与受限本地辅助服务。
 
 
@@ -42,16 +44,52 @@
 | :--- | :--- |
 | **全自动换 IP 自愈** | 支持甲骨文云（OCI 原生秒级换 IP）、通用 VPS（多探针监控+告警）、自定义脚本 Hook。换完自动改 Cloudflare DNS。 |
 | **智能订阅引擎** | 自动提取 VLESS-Reality、Hysteria 2、Trojan。输出直连 IP 节点，免疫国内 DNS 污染，彻底解决软路由 Fake-IP 冲突。 |
-| **EdgeTunnel 边缘与优选调度** | 深度纳管 Cloudflare Pages / Workers Serverless 端点，集成电信、联通、移动三网 Anycast Clean IP 自动测速与动态节点拼装，策略组物理隔离与容灾自愈回退。 |
+| **EdgeTunnel 边缘与优选调度** | 接入自有 Pages / Worker VLESS-WS 端点，合并公开候选源并验证真实 HTTPS 下载；服务器侧与三网探测设备结果分开标注，仅下发有效实测节点。 |
 | **渐进式安全防御加固** | **Host Guard** 域名嗅探拦截（裸 IP 扫描直接丢弃返回空白 404）、根路径 `/` 逼真 Nginx 欢迎页伪装、安全隐蔽路径（`/sentinel`）、加盐哈希管理员认证网关、多协议订阅 Token 防抓取，以及 Cloudflare CDN 代理就绪支持。 |
 | **IP 纯净度与解锁体检** | 实时公网画像、Scamalytics 权威欺诈分与风控评估、4 项 DNSBL 黑名单洁净监测，以及 OpenAI (ChatGPT)、Anthropic (Claude)、Gemini、Netflix、YouTube Premium、Disney+ 解锁状态体检。 |
-| **多节点三网性能测速** | 集成原生测速内核与国内电信、联通、移动骨干节点链路往返延迟（RTT）、抖动、丢包率与全带宽并发压测，输出综合链路评级。 |
+| **多节点三网性能测速** | 从服务器探测指定国内运营商与国际目标的 ICMP RTT、标准差和丢包率；支持带宽检测，明确区分本机权限错误与目标无回应。 |
 | **多节点与中转聚合** | 支持挂载外部独立节点（如日本原生机、香港低延迟机）及国内跳板机（Realm 端口转发），自动合并到统一订阅中。 |
 | **WARP 双栈智能洗白** | 本地 Wireproxy 用户态 WireGuard，仅针对 OpenAI、Anthropic、Netflix、Disney+ 走 WARP，YouTube/常规网页直连千兆带宽。 |
 | **BBR + TCP 暴力调优** | FQ 队列、64MB 发送/接收缓冲区、空闲不降速（`tcp_slow_start_after_idle=0`），彻底跑满跨洋高延迟带宽。 |
 | **私有微服务套件** | 预置 Docker 容器化编排：Uptime Kuma 态势感知监控、Alist 分布式多存储聚合挂载、Sub-Store 订阅处理流水线（内置前后端一体化）。 |
 | **即时阻断告警** | 支持 Telegram Bot、Discord Webhook、Bark (iOS) 及自定义 Webhook，被墙/自愈/换 IP 即刻推送到手。 |
-| **工业风控制台** | 实时 CPU/内存/磁盘/网络图表、WARP 状态检测、敏感 IP/域名一键高斯模糊防截屏泄露。 |
+| **自适应控制台** | 实时监控、手机底部导航、可滚动设置弹窗；路由保留当前模块及订阅格式，支持刷新和浏览器前进、后退。 |
+
+---
+
+## v2.7.0 使用要点
+
+### EDT 候选池与实测订阅
+
+- 先部署自己的 Pages / Worker 端点，并填写与端点一致的 UUID、WebSocket 路径和代理覆盖配置。
+- 候选可手动填写，或接入最多三个 HTTPS 文本源；支持 `IPv4` 和 `IP:443#备注`。来源示例、探测设备接入和完整限制见 [EDT 优选说明](docs/EDT-OPTIMIZER.md)。
+- 每轮最多 24 个候选、4 个并发，每候选检测两次；经 VLESS 隧道验证目标 HTTPS 证书并下载 64 KiB。可选择 Cloudflare 或 Wikimedia 验证目标。
+- 只有通过检测、端点配置匹配且 6 小时内的结果才生成 EDT 订阅节点。一次失败不会立即清空仍有效的旧池；没有有效结果时，更新订阅也不会凭空生成节点。
+- 第三方列表的“三网”标签仅供分类。**真实三网优选需要电信、联通、移动网络上的可信探测设备**；短下载测速不等于线路极限带宽。
+
+### 手机导航与页面路由
+
+手机端底部提供「概览 / 订阅 / 节点 / 集群 / 服务」五个入口。切换页面自动更新地址；刷新及浏览器前进、后退会恢复相应模块和订阅类型。例如：
+
+```text
+https://<你的域名>:20540/sentinel#/overview
+https://<你的域名>:20540/sentinel#/rules/singbox
+https://<你的域名>:20540/sentinel#/transits
+https://<你的域名>:20540/sentinel#/mesh
+https://<你的域名>:20540/sentinel#/services
+```
+
+自定义安全入口时，将 `/sentinel` 替换为实际路径。路由不替代登录，不会保存尚未提交的表单内容。
+
+### ICMP 延迟探测排查
+
+新安装会安装 ping 工具，并准备供受限服务使用的无文件 capabilities 副本。对于禁用普通 ICMP socket 的主机，安装脚本仅为 VPSentinel 服务组启用权限；不会放宽已有的有效组策略。现有实例遇到「本机无 ICMP 权限」时，可先核对并由管理员运行：
+
+```bash
+sudo bash /opt/vpsentinel/scripts/configure-ping.sh
+```
+
+本机权限不足、缺少工具、进程超时与目标不回应分别显示；目标不回 ICMP 不足以证明代理或整条线路被阻断。这里测量的是服务器到指定目标的往返延迟，不是手机到服务器的延迟。
 
 ---
 
@@ -76,13 +114,13 @@ sudo bash scripts/install.sh
 ```text
 https://<你的服务器IP>:20540/sentinel
 ```
-* **跳过证书提示**：若 Chrome / Edge 提示“您的连接不是私密连接”，直接在网页任意空白处键盘盲打这几个英文字母即可跳过：`thisisunsafe`
+* **HTTPS 证书**：优先使用绑定域名且可信的证书。出现证书警告时先核对访问地址、证书链和有效期；首次部署的证书与迁移事项见 [安全整改说明](docs/SECURITY-REMEDIATION-2026-10-13.md)。
 * **管理员凭据**：账号 `admin`，初始密码由系统初始化时自动生成并在终端打印，首次登入后强制提示修改。
 
 ### 第 3 步：选择【新手极速模式】一键生成订阅
 网页会自动唤起初始化向导，默认处于 **新手极速模式**：
 1. **确认出海模式**：
-   * **EdgeTunnel 智能优选（推荐）**：填入你的 Pages / Worker 域名与 UUID（支持一键随机生成），借助 Cloudflare 全球边缘网络，节点免被封，并自动测速优选三大运营商低延迟 IP。
+   * **EdgeTunnel 智能优选（推荐）**：填入你的 Pages / Worker 域名与 UUID（支持一键随机生成），通过实际隧道检测可用地址；服务器侧结果不代表国内三网表现，三网实测需部署对应线路的探测设备。
    * **原生 VPS 直出**：直接以本机 VPS 公网 IP 直连出海。
 2. **设置常用密码**（可选，建议设置）。
 3. 点击 **【一键开启自愈与生成订阅】**，页面将直接弹出订阅就绪卡片，提供 **Clash / Sing-box / v2rayN** 一键导入与复制链接，即可直接使用！

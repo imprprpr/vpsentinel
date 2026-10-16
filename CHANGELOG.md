@@ -17,6 +17,24 @@ All notable changes to the **Oracle Sentinel** project will be documented in thi
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.7.0] - 2026-10-16
+
+### Added
+- 实测 EdgeTunnel 候选源合并、缓存与轮换，Cloudflare / Wikimedia 两种 HTTPS 下载验证目标，以及线路探测设备的受限任务与结果上报。
+- 手机底部导航、自适应表单与弹窗；保留模块及订阅格式的 URL 路由，支持刷新、前进和后退。
+- 按版本 Markdown 说明发布 GitHub Release 的工作流，以及可复用的 Release 模板。
+
+### Fixed
+- EDT 刷新接口快照字段、域名输入兼容性、代理覆盖路径与有效旧池保留。
+- ICMP 在受限服务下无法执行却被误报为丢包；新增专用无 capabilities 的 ping 副本和受限组权限配置。
+- 延迟矩阵行列结构丢失，无有效样本时虚构均值与评级，以及来源和测速目标的适用范围说明。
+
+### Security
+- 汇总此前安全整改：管理/订阅/Mesh/证书权限隔离、外连及文件保护、依赖锁定、普通用户管理服务与受限本地辅助服务。
+- 完整说明和升级边界见 [v2.7.0 发布说明](docs/releases/v2.7.0.md)。
+
+---
+
 ## [2.6.6] - 2026-10-01
 
 ### Telemetry Field Alignment & Overview Dashboard Rendering Fix (概览监控字段双契约对齐与域名RTT渲染修复)
